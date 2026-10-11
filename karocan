@@ -1,0 +1,846 @@
+--[[
+	AIRFLOW LIQUID  -  PATCH
+	Each block says what to REPLACE or INSERT and where. Names match your file.
+
+	 1. popIn                      (replace)      - animation can replay
+	 2. Window:_revealCards        (replace)      - replays every time you open a tab
+	 3. Window:SelectTab           (replace)      - fixes the tween that cancelled itself
+	 4. Tab button squash          (insert)
+	 5. Compact metrics wrapper    (insert)       - Pages elements get smaller
+	 6. Slider min height          (2 tiny edits)
+	 7. Container:_columns         (1 line edit)
+	 8. Container:Section          (replace)      - collapsible sections
+	 9. Container:Pages            (replace)      - smaller strip + compact elements
+	10. Hover Pill / island        (replace pill block + _collapse + _expand, add 3 methods)
+]]
+
+----------------------------------------------------------------------
+-- 1. REPLACE `local function popIn` (near the top, above fadeIn)
+--    Old version could only run once because of the _revealed flag and
+--    because a half-finished pop left the card hidden. This one is
+--    token based, so you can re-run it as often as you want.
+----------------------------------------------------------------------
+local function popIn(obj, delay, force)
+	if not obj.Visible and not obj:GetAttribute("AF_Pop") and not force then return end
+	local token = (obj:GetAttribute("AF_PopToken") or 0) + 1
+	obj:SetAttribute("AF_PopToken", token)
+	obj:SetAttribute("AF_Pop", true)
+	obj.Visible = false
+	task.delay(delay, function()
+		if not obj.Parent or obj:GetAttribute("AF_PopToken") ~= token then return end
+		local s = obj:FindFirstChildOfClass("UIScale") or new("UIScale", { Parent = obj })
+		s.Scale = .9
+		obj.Visible = true
+		obj:SetAttribute("AF_Pop", nil)
+		tween(s, { Scale = 1 }, .55, SPRING)
+	end)
+end
+
+----------------------------------------------------------------------
+-- 2. REPLACE `function Window:_revealCards`
+--    No more `tab._revealed` guard. Sections inside columns are staggered
+--    one by one too.
+----------------------------------------------------------------------
+function Window:_revealCards(tab, delay)
+	delay = delay or 0
+	tab.List.CanvasPosition = Vector2.new(0, 0)
+	local n = 0
+	local function nextDelay()
+		local d = delay + math.min(n, 14) * .035
+		n += 1
+		return d
+	end
+	for _, c in ipairs(tab.List:GetChildren()) do
+		if c:IsA("GuiObject") then
+			local left, right = c:FindFirstChild("Left"), c:FindFirstChild("Right")
+			if c:IsA("Frame") and left and right then
+				for _, side in ipairs({ left, right }) do
+					for _, s in ipairs(side:GetChildren()) do
+						if s:IsA("GuiObject") then popIn(s, nextDelay()) end
+					end
+				end
+			else
+				popIn(c, nextDelay())
+			end
+		end
+	end
+end
+
+----------------------------------------------------------------------
+-- 3. REPLACE `function Window:SelectTab`
+--    Bug was: two tweens on `layer` (GroupTransparency + Position, then
+--    GroupTransparency again). The 2nd tween cancelled the 1st one, so the
+--    spring never finished. Now they touch different properties.
+----------------------------------------------------------------------
+function Window:SelectTab(tab)
+	if self.CurrentTab == tab then return end
+	local prev = self.CurrentTab
+	self.CurrentTab = tab
+	self:_closePopups()
+	self:_settleTransition()
+	local gen = (self._transitionGeneration or 0) + 1
+	self._transitionGeneration = gen
+	if prev then
+		tween(prev._button, { BackgroundTransparency = 1 }, .2)
+		tween(prev._stroke, { Transparency = 1 }, .2)
+		tween(prev._label, { TextColor3 = Theme.Muted }, .2)
+		if prev._icon then tween(prev._icon, { ImageColor3 = Theme.Muted }, .2) end
+		local out = self._outLayer
+		prev._page.Parent = out
+		self._outPage = prev._page
+		out.GroupTransparency = 0
+		out.Position = UDim2.fromOffset(0, 0)
+		out.Visible = true
+		tween(out, { GroupTransparency = 1, Position = UDim2.fromOffset(0, -12) }, .22)
+		task.delay(.22, function() if self._transitionGeneration == gen then self:_settleOut() end end)
+	end
+	tween(tab._button, { BackgroundTransparency = 0 }, .2)
+	tween(tab._stroke, { Transparency = 0 }, .2)
+	tween(tab._label, { TextColor3 = Theme.Text }, .2)
+	if tab._icon then tween(tab._icon, { ImageColor3 = Theme.Accent }, .2) end
+	self:_placeIndicator(tab)
+	local pg = tab._page
+	pg.Position = UDim2.fromOffset(0, 0)
+	pg.Visible = true
+	pg.Parent = self._inLayer
+	self._inPage = pg
+	local layer = self._inLayer
+	layer.GroupTransparency = 1
+	layer.Position = UDim2.fromOffset(0, 22)
+	layer.Visible = true
+	tween(layer, { Position = UDim2.fromOffset(0, 0) }, .65, SPRING) -- position only
+	tween(layer, { GroupTransparency = 0 }, .3)                         -- fade only
+	if self._introDone then self:_revealCards(tab, .05) end            -- replays EVERY time
+	task.delay(.7, function() if self._transitionGeneration == gen then self:_settleIn() end end)
+end
+
+----------------------------------------------------------------------
+-- 4. INSERT in Window:Tab, right after
+--      button.MouseButton1Click:Connect(function() self:SelectTab(tab) end)
+--    (jelly squash on the tab button)
+----------------------------------------------------------------------
+do
+	-- paste the 4 lines below inside Window:Tab, they use `button`
+	--[[
+	local bscale = button:FindFirstChildOfClass("UIScale") or new("UIScale", { Parent = button })
+	button.MouseButton1Down:Connect(function() tween(bscale, { Scale = .94 }, .1) end)
+	button.MouseButton1Up:Connect(function() tween(bscale, { Scale = 1 }, .55, SPRING) end)
+	button.MouseLeave:Connect(function() tween(bscale, { Scale = 1 }, .4, SPRING) end)
+	]]
+end
+
+----------------------------------------------------------------------
+-- 5. INSERT right above the `-- Create* aliases` loop
+--    Anything built inside a Page (or a Section inside a Page) uses
+--    smaller row heights. Change the numbers to taste.
+----------------------------------------------------------------------
+do
+	for name, fn in pairs(table.clone(Container)) do
+		if type(fn) == "function" and name:sub(1, 1) ~= "_" then
+			Container[name] = function(self, ...)
+				if not self._compact then return fn(self, ...) end
+				local r, d = ROW_H, DESC_H
+				ROW_H, DESC_H = Touch and 46 or 40, Touch and 62 or 56
+				local res = table.pack(pcall(fn, self, ...))
+				ROW_H, DESC_H = r, d
+				if not res[1] then error(res[2], 0) end
+				return table.unpack(res, 2, res.n)
+			end
+		end
+	end
+end
+
+----------------------------------------------------------------------
+-- 6. SLIDER: it has a fixed inner layout, so it should not shrink.
+--    In Container:Slider change these two lines:
+--      local card, st = makeCard(self, "Frame", DESC_H)
+--      local trackY = DESC_H - 18
+--    to:
+--      local SH = math.max(DESC_H, 62)
+--      local card, st = makeCard(self, "Frame", SH)
+--      ...
+--      local trackY = SH - 18
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+-- 7. In Container:_columns change this line
+--      local cols = { Row = row, Left = left, Right = right, Count = { Left = 0, Right = 0 } }
+--    to:
+--      local cols = { Row = row, Left = left, Right = right, Count = { Left = 0, Right = 0 }, Sections = { Left = {}, Right = {} } }
+----------------------------------------------------------------------
+
+----------------------------------------------------------------------
+-- 8. REPLACE `function Container:Section`  (collapsible!)
+--    Click the section header to fold / unfold it (liquid squash).
+--    Section{ Name, Side = "Left"|"Right", Collapsed = false, Collapsible = true }
+--    API: sec:SetCollapsed(bool) / sec:Toggle() / sec:IsCollapsed()
+--    Whole column: tab:SetColumnCollapsed("Left", true)
+----------------------------------------------------------------------
+function Container:Section(cfg)
+	if self._kind == "Section" then return self:Header(cfg) end
+	cfg = norm(cfg, { Title = "Name" })
+	local win = self.Window
+	local cols = self:_columns()
+	local side = cfg.Side and string.lower(tostring(cfg.Side)) or nil
+	if side == "left" then side = "Left" elseif side == "right" then side = "Right" else
+		side = cols.Count.Left <= cols.Count.Right and "Left" or "Right"
+	end
+	cols.Count[side] += 1
+	local parent = cols[side]
+	local collapsible = cfg.Collapsible ~= false
+
+	local card = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = Theme.Surface, BorderSizePixel = 0,
+		LayoutOrder = cols.Count[side], Parent = parent,
+	})
+	corner(card, UDim.new(0, 10))
+	stroke(card, Theme.Stroke)
+	pad(card, 10, 10, 6, 10)
+	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6), Parent = card })
+	local cardScale = new("UIScale", { Parent = card })
+
+	local head = new("TextButton", {
+		Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, Text = "", AutoButtonColor = false, LayoutOrder = 0, Parent = card,
+	})
+	local dot = new("Frame", { AnchorPoint = Vector2.new(0, .5), Position = UDim2.new(0, 2, .5, 0), Size = UDim2.fromOffset(6, 6), BackgroundColor3 = Theme.Accent, BorderSizePixel = 0, Parent = head })
+	corner(dot, UDim.new(1, 0))
+	local label = mkText {
+		Position = UDim2.fromOffset(16, 0), Size = UDim2.new(1, -44, 1, 0), Text = string.upper(cfg.Name or "Section"), TextSize = 12,
+		TextColor3 = Theme.Text, Parent = head,
+	}
+	local chevron = collapsible and makeChevron(head, 1, -2) or nil
+	if chevron then chevron:Set(true) end
+
+	-- body: bodyClip animates its height, body holds the real elements
+	local bodyClip = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, ClipsDescendants = true, LayoutOrder = 1, Parent = card,
+	})
+	local body = new("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Parent = bodyClip })
+	pad(body, 2, 2, 2, 2) -- room so element strokes are not clipped
+	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = body })
+
+	local sec = setmetatable({
+		Name = cfg.Name or "Section", Window = win, List = body, _order = 0, _kind = "Section", _compact = self._compact,
+	}, Container)
+
+	local collapsed, gen = false, 0
+	local function setCollapsed(c, instant)
+		c = c == true
+		if c == collapsed then return end
+		collapsed = c
+		gen += 1
+		local g = gen
+		local s = math.max(win.Scale.Scale, .01)
+		local cur = bodyClip.AbsoluteSize.Y / s
+		local full = body.AbsoluteSize.Y / s
+		bodyClip.AutomaticSize = Enum.AutomaticSize.None
+		bodyClip.Size = UDim2.new(1, 0, 0, cur)
+		if chevron then chevron:Set(not c) end
+		tween(dot, { BackgroundTransparency = c and .75 or 0 }, instant and 0 or .25)
+		tween(label, { TextColor3 = c and Theme.Muted or Theme.Text }, instant and 0 or .25)
+		if c then
+			tween(bodyClip, { Size = UDim2.new(1, 0, 0, 0) }, instant and 0 or .5, LIQUID)
+		elseif instant then
+			bodyClip.Size = UDim2.new(1, 0, 0, 0)
+			bodyClip.AutomaticSize = Enum.AutomaticSize.Y
+		else
+			tween(bodyClip, { Size = UDim2.new(1, 0, 0, full) }, .6, SPRING)
+			task.delay(.62, function()
+				if g == gen and not collapsed then
+					bodyClip.Size = UDim2.new(1, 0, 0, 0)
+					bodyClip.AutomaticSize = Enum.AutomaticSize.Y
+				end
+			end)
+		end
+		if cols.Update then task.defer(cols.Update) end
+	end
+
+	if collapsible then
+		head.MouseEnter:Connect(function() tween(label, { TextColor3 = Theme.Accent }, .15) end)
+		head.MouseLeave:Connect(function()
+			tween(label, { TextColor3 = collapsed and Theme.Muted or Theme.Text }, .25)
+			tween(cardScale, { Scale = 1 }, .5, SPRING)
+		end)
+		head.MouseButton1Down:Connect(function() tween(cardScale, { Scale = .985 }, .1) end)
+		head.MouseButton1Up:Connect(function() tween(cardScale, { Scale = 1 }, .6, SPRING) end)
+		head.MouseButton1Click:Connect(function() setCollapsed(not collapsed) end)
+	else
+		head.Active = false
+	end
+
+	function sec:Set(t) label.Text = string.upper(t) end
+	function sec:SetCollapsed(c, instant) setCollapsed(c, instant) end
+	function sec:Toggle() setCollapsed(not collapsed) end
+	function sec:IsCollapsed() return collapsed end
+
+	table.insert(cols.Sections[side], sec)
+	local reg = register(self, cfg, sec, card, "Section")
+	reg._listeners = { function()
+		cols.Count[side] = math.max(cols.Count[side] - 1, 0)
+		for i, s in ipairs(cols.Sections[side]) do if s == sec then table.remove(cols.Sections[side], i) break end end
+		cols.Update()
+	end }
+	if cfg.Collapsed then setCollapsed(true, true) end
+	task.defer(cols.Update)
+	return reg
+end
+
+-- collapse / open a whole column:  tab:SetColumnCollapsed("Left", true)
+function Container:SetColumnCollapsed(side, collapsed)
+	local cols = self._cols
+	if not cols then return end
+	side = string.lower(tostring(side)) == "right" and "Right" or "Left"
+	for _, s in ipairs(cols.Sections[side]) do s:SetCollapsed(collapsed) end
+end
+function Container:SetAllSectionsCollapsed(collapsed)
+	self:SetColumnCollapsed("Left", collapsed)
+	self:SetColumnCollapsed("Right", collapsed)
+end
+
+----------------------------------------------------------------------
+-- 9. REPLACE `function Container:Pages`
+--    Smaller tab strip (30/24 instead of 34/28), tighter spacing, and every
+--    page is a compact container (see step 5).
+----------------------------------------------------------------------
+function Container:Pages(cfg)
+	cfg = norm(cfg, { Title = "Name" })
+	local win = self.Window
+	local STRIP_H, BTN_H = 30, 24
+	local root = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+		LayoutOrder = self:_nextOrder(), Parent = self.List,
+	})
+	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = root })
+	local stripRow = new("Frame", { Size = UDim2.new(1, 0, 0, STRIP_H), BackgroundTransparency = 1, LayoutOrder = 1, Parent = root })
+	local track = new("Frame", { Size = UDim2.fromOffset(6, STRIP_H), BackgroundColor3 = Theme.Surface2, BorderSizePixel = 0, Parent = stripRow })
+	corner(track, UDim.new(0, 8))
+	stroke(track, Theme.Stroke)
+	track:SetAttribute("NoDrag", true)
+	local indicator = new("Frame", {
+		Position = UDim2.fromOffset(3, 3), Size = UDim2.fromOffset(0, BTN_H), BackgroundColor3 = Theme.Accent, BackgroundTransparency = .86,
+		BorderSizePixel = 0, Visible = false, ZIndex = 1, Parent = track,
+	})
+	corner(indicator, UDim.new(0, 6))
+	stroke(indicator, Theme.Accent, .55)
+	local buttonRow = new("Frame", { Position = UDim2.fromOffset(3, 3), Size = UDim2.fromOffset(0, BTN_H), BackgroundTransparency = 1, ZIndex = 2, Parent = track })
+	local rowLayout = new("UIListLayout", {
+		FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 2), Parent = buttonRow,
+	})
+	rowLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+		buttonRow.Size = UDim2.fromOffset(rowLayout.AbsoluteContentSize.X, BTN_H)
+		track.Size = UDim2.fromOffset(rowLayout.AbsoluteContentSize.X + 6, STRIP_H)
+	end)
+	local holder = new("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = 2, Parent = root })
+
+	local obj = { _pages = {}, Current = nil }
+	local indGen = 0
+	local function moveIndicator(entry, instant)
+		local s = win.Scale.Scale
+		local x = (entry.Button.AbsolutePosition.X - track.AbsolutePosition.X) / s
+		local w = entry.Button.AbsoluteSize.X / s
+		if w <= 0 then return end
+		if not indicator.Visible or instant then
+			indicator.Visible = true
+			indicator.Position = UDim2.fromOffset(x, 3)
+			indicator.Size = UDim2.fromOffset(w, BTN_H)
+			return
+		end
+		indGen += 1
+		local gen = indGen
+		local x0, w0 = indicator.Position.X.Offset, indicator.Size.X.Offset
+		local left, right = math.min(x0, x), math.max(x0 + w0, x + w)
+		tween(indicator, { Position = UDim2.fromOffset(left, 3), Size = UDim2.fromOffset(right - left, BTN_H) }, .14)
+		task.delay(.12, function()
+			if gen ~= indGen then return end
+			tween(indicator, { Position = UDim2.fromOffset(x, 3), Size = UDim2.fromOffset(w, BTN_H) }, .5, SPRING)
+		end)
+	end
+
+	function obj:Select(which, instant)
+		local entry
+		for _, e in ipairs(obj._pages) do
+			if e.Container == which or e.Name == which or e == which then entry = e end
+		end
+		if not entry or entry == obj.Current then return end
+		local prev = obj.Current
+		obj.Current = entry
+		win:_closePopups()
+		if prev then
+			prev.Frame.Visible = false
+			tween(prev.Label, { TextColor3 = Theme.Muted }, .2)
+			if prev.Icon then tween(prev.Icon, { ImageColor3 = Theme.Muted }, .2) end
+		end
+		tween(entry.Label, { TextColor3 = Theme.Text }, .2)
+		if entry.Icon then tween(entry.Icon, { ImageColor3 = Theme.Accent }, .2) end
+		entry.Frame.Visible = true
+		if instant or not prev then
+			entry.Frame.GroupTransparency = 0
+			entry.Padding.PaddingTop = UDim.new(0, 0)
+		else
+			entry.Frame.GroupTransparency = 1
+			entry.Padding.PaddingTop = UDim.new(0, 16)
+			tween(entry.Frame, { GroupTransparency = 0 }, .35)
+			tween(entry.Padding, { PaddingTop = UDim.new(0, 0) }, .6, SPRING)
+		end
+		task.defer(moveIndicator, entry, instant or not prev)
+	end
+
+	function obj:Page(pcfg)
+		pcfg = norm(pcfg, { Title = "Name" })
+		local entry = { Name = pcfg.Name or ("Page " .. (#obj._pages + 1)) }
+		local btn = new("TextButton", {
+			Size = UDim2.fromOffset(0, BTN_H), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, Text = "", AutoButtonColor = false,
+			LayoutOrder = #obj._pages + 1, ZIndex = 2, Parent = buttonRow,
+		})
+		pad(btn, 10, 10)
+		local leftOff = 0
+		if pcfg.Icon then
+			local box, img = iconBox(btn, pcfg.Icon, Theme.Muted, UDim2.new(0, 0, .5, 0))
+			box.ZIndex = 3
+			img.ZIndex = 3
+			entry.Icon = img
+			leftOff = 22
+		end
+		entry.Label = mkText {
+			Position = UDim2.fromOffset(leftOff, 0), Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, Text = entry.Name,
+			TextSize = 13, TextColor3 = Theme.Muted, TextTruncate = Enum.TextTruncate.None, ZIndex = 3, Parent = btn,
+		}
+		entry.Button = btn
+		btn.MouseEnter:Connect(function() if obj.Current ~= entry then tween(entry.Label, { TextColor3 = Theme.Text }, .12) end end)
+		btn.MouseLeave:Connect(function() if obj.Current ~= entry then tween(entry.Label, { TextColor3 = Theme.Muted }, .2) end end)
+		btn.MouseButton1Click:Connect(function() obj:Select(entry) end)
+		btn:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+			if obj.Current == entry then moveIndicator(entry, true) end
+		end)
+
+		local frame = new("CanvasGroup", {
+			Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Visible = false, Parent = holder,
+		})
+		entry.Frame = frame
+		entry.Padding = pad(frame, 0, 0, 0, 0)
+		new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6), Parent = frame })
+		local page = setmetatable({ Name = entry.Name, Window = win, List = frame, _order = 0, _kind = "Page", _compact = true }, Container)
+		entry.Container = page
+		table.insert(obj._pages, entry)
+		if #obj._pages == 1 then task.defer(function() obj:Select(entry, true) end) end
+		win._controlsDirty = true
+		return page
+	end
+	function obj:GetPage(name)
+		for _, e in ipairs(obj._pages) do if e.Name == name then return e.Container end end
+	end
+	return register(self, cfg, obj, root, "Pages")
+end
+
+----------------------------------------------------------------------
+-- 10. HOVER PILL (Dynamic-Island style)
+--
+--  Config (all optional):
+--    MobilePill = true,             -- pill must be on (default on touch only)
+--    Pill = {
+--        Title = "Airflow", Icon = "...",
+--        Width = 320,
+--        HoverExpand = true,
+--        Stats = { "FPS", "Ping", "Time" },       -- also "Players"; or false to hide
+--                 -- custom: { Name = "Gold", Get = function() return 123 end }
+--        Open = true,                              -- the built-in "Open" button
+--        Actions = {                               -- extra buttons
+--            { Name = "Hide UI", Icon = "eye-off", Callback = function(win) end },
+--        },
+--        Build = function(panel, win) end,         -- panel = Frame you can parent anything to
+--    }
+--  Desktop: hover the pill and it blooms open, leave and it shrinks back.
+--  Touch:   tap the pill once to open it, tap the header again to open the window.
+--
+--  10a. In Library.Window replace
+--         local pillCfg = type(pillOpt) == "table" and pillOpt or {}
+--       with
+--         local pillCfg = type(cfg.Pill) == "table" and cfg.Pill or (type(pillOpt) == "table" and pillOpt or {})
+--
+--  10b. In Library.Window REPLACE everything from the comment
+--         -- pill layer (visible only while collapsed)
+--       down to and including the line
+--         win._pillLayer = pillLayer
+--       with the block below.
+----------------------------------------------------------------------
+	-- pill header (visible only while collapsed)
+	local pillTitle = pillCfg.Title or cfg.Title or "Airflow"
+	local pillW = math.clamp(TextService:GetTextSize(pillTitle, 13, Enum.Font.GothamMedium, Vector2.new(400, 20)).X + 64, 120, 280)
+	win._pillWidth = pillW
+	win._islandW = pillCfg.Width or 320
+	win._islandOpen = false
+	win._islandItems = {}
+	win.PillHover = pillCfg.HoverExpand ~= false
+
+	local pillLayer = new("CanvasGroup", {
+		Name = "PillLayer", Size = UDim2.new(1, 0, 0, PILL_H), BackgroundTransparency = 1, GroupTransparency = 1, Visible = false, ZIndex = 55, Parent = body,
+	})
+	local pillLogoBox = new("Frame", { AnchorPoint = Vector2.new(0, .5), Position = UDim2.new(0, 14, .5, 0), Size = UDim2.fromOffset(20, 20), BackgroundTransparency = 1, Parent = pillLayer })
+	local pillLogo = new("ImageLabel", {
+		AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .5), Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+		ImageColor3 = Theme.Accent, ScaleType = Enum.ScaleType.Fit, Parent = pillLogoBox,
+	})
+	setIcon(pillLogo, pillCfg.Icon or cfg.Icon or Assets.Logo)
+	local pillLabel = mkText {
+		Position = UDim2.fromOffset(44, 0), Size = UDim2.new(1, -56, 1, 0), Text = pillTitle, TextSize = 13, TextTruncate = Enum.TextTruncate.AtEnd, Parent = pillLayer,
+	}
+	win._pillHint = mkText {
+		AnchorPoint = Vector2.new(1, .5), Position = UDim2.new(1, -16, .5, 0), Size = UDim2.fromOffset(90, PILL_H), Text = Touch and "tap to open" or "click to open",
+		TextSize = 11, TextColor3 = Theme.Muted, TextXAlignment = Enum.TextXAlignment.Right, TextTransparency = 1, Parent = pillLayer,
+	}
+	local pillBtn = new("TextButton", {
+		Size = UDim2.new(1, 0, 0, PILL_H), BackgroundTransparency = 1, Text = "", AutoButtonColor = false, Visible = false, ZIndex = 60, Parent = body,
+	})
+	win._pillBtn = pillBtn
+	win._pillLayer = pillLayer
+
+	-- island: the panel that blooms below the header
+	local island = new("CanvasGroup", {
+		Name = "Island", Position = UDim2.fromOffset(0, PILL_H), Size = UDim2.new(1, 0, 1, -PILL_H), BackgroundTransparency = 1,
+		GroupTransparency = 1, Visible = false, ZIndex = 62, Parent = body,
+	})
+	win._islandLayer = island
+	local ilist = new("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Parent = island })
+	pad(ilist, 12, 12, 2, 12)
+	local ilayout = new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8), Parent = ilist })
+	new("Frame", { Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = Theme.Stroke, BorderSizePixel = 0, LayoutOrder = 0, Parent = ilist })
+
+	-- live stats
+	local avg = 1 / 60
+	win:_listen("Render", function(dt)
+		avg = avg * .9 + dt * .1
+		win._fps = math.floor(1 / math.max(avg, .001) + .5)
+	end)
+	local builtin = {
+		FPS = function() return tostring(win._fps or 0) end,
+		Ping = function()
+			local ok, v = pcall(function() return math.floor(LocalPlayer:GetNetworkPing() * 1000) end)
+			return (ok and v or 0) .. " ms"
+		end,
+		Time = function() return os.date(pillCfg.TimeFormat or "%H:%M") end,
+		Players = function() return #Players:GetPlayers() .. " / " .. Players.MaxPlayers end,
+	}
+	local statValues, hasStats, hasActs = {}, false, false
+	local names = pillCfg.Stats
+	if names == nil then names = { "FPS", "Ping", "Time" } end
+	if type(names) == "table" and #names > 0 then
+		hasStats = true
+		local row = new("Frame", { Size = UDim2.new(1, 0, 0, 46), BackgroundTransparency = 1, LayoutOrder = 1, Parent = ilist })
+		local n = #names
+		for i, s in ipairs(names) do
+			local nameText, getter = s, builtin[s]
+			if type(s) == "table" then nameText, getter = s.Name or "Stat", s.Get or s.Update end
+			local chipF = new("Frame", {
+				Position = UDim2.new((i - 1) / n, 3, 0, 0), Size = UDim2.new(1 / n, -6, 1, 0), BackgroundColor3 = Theme.Surface2, BorderSizePixel = 0, Parent = row,
+			})
+			corner(chipF, UDim.new(0, 10))
+			stroke(chipF)
+			local sc = new("UIScale", { Parent = chipF })
+			mkText { Position = UDim2.fromOffset(10, 6), Size = UDim2.new(1, -20, 0, 14), Text = tostring(nameText), TextSize = 11, TextColor3 = Theme.Muted, Parent = chipF }
+			local v = mkText { Position = UDim2.fromOffset(10, 22), Size = UDim2.new(1, -20, 0, 18), Text = "…", TextSize = 14, TextColor3 = Theme.Accent, Parent = chipF }
+			table.insert(statValues, { v, getter })
+			table.insert(win._islandItems, sc)
+		end
+	end
+	local function refreshStats()
+		for _, e in ipairs(statValues) do
+			if e[2] then
+				local ok, r = pcall(e[2])
+				if ok and r ~= nil then e[1].Text = tostring(r) end
+			end
+		end
+	end
+	win._refreshPillStats = refreshStats
+	task.spawn(function()
+		while not win._destroyed do
+			if win._islandOpen then refreshStats() end
+			task.wait(.5)
+		end
+	end)
+
+	-- action buttons
+	local acts = {}
+	if pillCfg.Open ~= false then
+		table.insert(acts, { Name = pillCfg.OpenText or "Open", Icon = "maximize-2", Primary = true, Callback = function() win:_expand() end })
+	end
+	for _, a in ipairs(pillCfg.Actions or {}) do table.insert(acts, a) end
+	if #acts > 0 then
+		hasActs = true
+		local row = new("Frame", { Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, LayoutOrder = 2, Parent = ilist })
+		local n = #acts
+		for i, a in ipairs(acts) do
+			local primary = a.Primary == true
+			local btn = new("TextButton", {
+				Position = UDim2.new((i - 1) / n, 3, 0, 0), Size = UDim2.new(1 / n, -6, 1, 0),
+				BackgroundColor3 = primary and Theme.Accent or Theme.Surface2, BackgroundTransparency = primary and .12 or 0,
+				BorderSizePixel = 0, Text = "", AutoButtonColor = false, ClipsDescendants = true, Parent = row,
+			})
+			corner(btn, UDim.new(0, 9))
+			local bst = stroke(btn, primary and Theme.Accent or Theme.Stroke, primary and .4 or 0)
+			local sc = new("UIScale", { Parent = btn })
+			local inner = new("Frame", {
+				AnchorPoint = Vector2.new(.5, .5), Position = UDim2.fromScale(.5, .5), Size = UDim2.fromOffset(0, 18),
+				AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, Parent = btn,
+			})
+			new("UIListLayout", {
+				FillDirection = Enum.FillDirection.Horizontal, VerticalAlignment = Enum.VerticalAlignment.Center,
+				SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6), Parent = inner,
+			})
+			local ink = primary and Theme.AccentDark or Theme.Text
+			if a.Icon then
+				local box = iconBox(inner, a.Icon, ink, UDim2.new())
+				box.LayoutOrder = 1
+			end
+			mkText {
+				Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, Text = a.Name or "Action", TextSize = 13, TextColor3 = ink,
+				TextTruncate = Enum.TextTruncate.None, LayoutOrder = 2, Parent = inner,
+			}
+			btn.MouseEnter:Connect(function()
+				if primary then tween(btn, { BackgroundTransparency = 0 }, .15)
+				else tween(bst, { Color = Theme.StrokeHover }, .15) end
+			end)
+			btn.MouseLeave:Connect(function()
+				if primary then tween(btn, { BackgroundTransparency = .12 }, .25)
+				else tween(bst, { Color = Theme.Stroke }, .25) end
+				tween(sc, { Scale = 1 }, .5, SPRING)
+			end)
+			btn.MouseButton1Down:Connect(function() tween(sc, { Scale = .93 }, .1) end)
+			btn.MouseButton1Up:Connect(function() tween(sc, { Scale = 1 }, .55, SPRING) end)
+			btn.MouseButton1Click:Connect(function()
+				ripple(btn)
+				win._islandTouched = os.clock()
+				fire(a.Callback, win)
+			end)
+			table.insert(win._islandItems, sc)
+		end
+	end
+
+	-- free area for your own stuff (win.PillPanel)
+	local panel = new("Frame", {
+		Name = "PillPanel", Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1,
+		LayoutOrder = 3, Visible = false, Parent = ilist,
+	})
+	new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6), Parent = panel })
+	panel.ChildAdded:Connect(function(c) if c:IsA("GuiObject") then panel.Visible = true end end)
+	win.PillPanel = panel
+	if type(pillCfg.Build) == "function" then fire(pillCfg.Build, panel, win) end
+
+	-- height of the island (estimate first, then measured)
+	win._islandH = 1 + 14 + (hasStats and 54 or 0) + (hasActs and 42 or 0)
+	local function measure()
+		local h = math.ceil(ilayout.AbsoluteContentSize.Y / math.max(win.Scale.Scale, .01)) + 14
+		if h > 20 and h ~= win._islandH then
+			win._islandH = h
+			if win._islandOpen then win:_applyIsland() end
+		end
+	end
+	win._measureIsland = measure
+	ilayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(measure)
+
+	-- header hover / press (cosmetic only, the island is driven by the frame step below)
+	local function pillHover(on)
+		if not win._pill or win._morphing then return end
+		tween(win.BodyStroke, { Color = on and Theme.Accent or Theme.Stroke }, .2)
+		tween(win._pillGlow, { ImageTransparency = on and .6 or (win._islandOpen and .75 or .88) }, .3)
+		tween(pillLogo, { Rotation = on and 20 or 0, Size = on and UDim2.fromScale(1.15, 1.15) or UDim2.fromScale(1, 1) }, .5, SPRING)
+		tween(pillLabel, { TextColor3 = on and Theme.Accent or Theme.Text }, .2)
+	end
+	pillBtn.MouseEnter:Connect(function() pillHover(true) end)
+	pillBtn.MouseLeave:Connect(function()
+		pillHover(false)
+		if win._pill and not win._morphing then tween(scale, { Scale = 1 }, .5, SPRING) end
+	end)
+	pillBtn.MouseButton1Down:Connect(function()
+		if win._pill and not win._morphing then tween(scale, { Scale = .96 }, .12) end
+	end)
+	pillBtn.MouseButton1Click:Connect(function()
+		if win._pill and not win._morphing then tween(scale, { Scale = 1 }, .5, SPRING) end
+		if Touch and win.PillHover and not win._islandOpen then
+			win:_setIsland(true)
+			return
+		end
+		win:_expand()
+	end)
+
+	-- hover detection (desktop) + auto close (touch)
+	local leaveAt
+	table.insert(win._frameSteps, function()
+		if not win._pill or win._morphing or not win.PillHover then leaveAt = nil return end
+		if Touch then
+			if win._islandOpen and os.clock() - (win._islandTouched or 0) > 4 then win:_setIsland(false) end
+			return
+		end
+		local m = mouse()
+		local p, s = body.AbsolutePosition, body.AbsoluteSize
+		local g = win._islandOpen and 8 or 0
+		local over = m.X >= p.X - g and m.X <= p.X + s.X + g and m.Y >= p.Y - g and m.Y <= p.Y + s.Y + g
+		if over then
+			leaveAt = nil
+			if not win._islandOpen then win:_setIsland(true) end
+		elseif win._islandOpen then
+			leaveAt = leaveAt or os.clock()
+			if os.clock() - leaveAt > .2 then
+				leaveAt = nil
+				win:_setIsland(false)
+			end
+		end
+	end)
+
+----------------------------------------------------------------------
+--  10c. DELETE your old pillHover / pillBtn.* lines (they are inside the
+--       block you just replaced) and ADD these methods next to
+--       Window:_collapse. Then REPLACE _collapse and _expand with the
+--       versions below.
+----------------------------------------------------------------------
+function Window:_islandDims()
+	local screenW = self.Gui.AbsoluteSize.X
+	local w = math.clamp(self._islandW or 320, self._pillWidth, math.max(screenW - 24, self._pillWidth))
+	return w, PILL_H + self._islandH
+end
+
+function Window:_applyIsland(style)
+	local w, h = self:_islandDims()
+	tween(self.Root, {
+		Size = UDim2.fromOffset(w, h),
+		Position = UDim2.new(.5, 0, 0, PILL_TOP + h / 2),
+	}, .6, style or SPRING)
+end
+
+function Window:_setIsland(on)
+	if not self._pill or self._morphing or self._islandOpen == on then return end
+	self._islandOpen = on
+	local layer = self._islandLayer
+	if on then
+		self._islandTouched = os.clock()
+		layer.Visible = true
+		self._measureIsland()
+		self:_refreshPillStats()
+		self:_applyIsland(SPRING)
+		tween(layer, { GroupTransparency = 0 }, .3)
+		tween(self.BodyCorner, { CornerRadius = UDim.new(0, 22) }, .55, SPRING)
+		tween(self._pillHint, { TextTransparency = 0 }, .3)
+		tween(self._pillGlow, { ImageTransparency = .75 }, .4)
+		tween(self.Shadow, { ImageTransparency = .5 }, .4)
+		for i, sc in ipairs(self._islandItems) do
+			sc.Scale = .8
+			task.delay(.05 + i * .045, function()
+				if self._islandOpen then tween(sc, { Scale = 1 }, .55, SPRING) end
+			end)
+		end
+		task.delay(.05, function() if self._islandOpen then self._measureIsland() end end)
+	else
+		tween(self.Root, {
+			Size = UDim2.fromOffset(self._pillWidth, PILL_H),
+			Position = UDim2.new(.5, 0, 0, PILL_TOP + PILL_H / 2),
+		}, .55, LIQUID)
+		tween(layer, { GroupTransparency = 1 }, .18)
+		tween(self.BodyCorner, { CornerRadius = UDim.new(0, PILL_H / 2) }, .55, LIQUID)
+		tween(self._pillHint, { TextTransparency = 1 }, .15)
+		tween(self._pillGlow, { ImageTransparency = .88 }, .3)
+		tween(self.Shadow, { ImageTransparency = .75 }, .4)
+		task.delay(.25, function() if not self._islandOpen then layer.Visible = false end end)
+	end
+end
+
+function Window:SetPillHover(v)
+	self.PillHover = v ~= false
+	if not self.PillHover then self:_setIsland(false) end
+end
+
+function Window:_collapse()
+	if self._pill or self._morphing or not self._introDone then return end
+	self._pill = true
+	self._morphing = true
+	self.Open = false
+	self._islandOpen = false
+	self._islandLayer.Visible = false
+	self._islandLayer.GroupTransparency = 1
+	self._pillHint.TextTransparency = 1
+	self:_closePopups()
+	local root = self.Root
+	self._fullSize = root.Size
+	self._restorePos = root.Position
+	self.Main.Size = UDim2.fromOffset(self._fullSize.X.Offset, self._fullSize.Y.Offset)
+	self.ResizeHandle.Visible = false
+	tween(self.Main, { GroupTransparency = 1 }, .2)
+	tween(root, {
+		Size = UDim2.fromOffset(self._pillWidth, PILL_H),
+		Position = UDim2.new(.5, 0, 0, PILL_TOP + PILL_H / 2),
+	}, .75, LIQUID)
+	tween(self.Scale, { Scale = 1 }, .6, SPRING)
+	tween(self.BodyCorner, { CornerRadius = UDim.new(0, PILL_H / 2) }, .65, LIQUID)
+	tween(self.Shadow, { ImageTransparency = .75 }, .5)
+	task.delay(.22, function()
+		if not self._pill then return end
+		self._pillLayer.Visible = true
+		tween(self._pillLayer, { GroupTransparency = 0 }, .35)
+		tween(self._pillGlow, { ImageTransparency = .88 }, .4)
+	end)
+	task.delay(.6, function()
+		self._morphing = false
+		if self._pill then self._pillBtn.Visible = true end
+	end)
+end
+
+function Window:_expand()
+	if not self._pill or self._morphing then return end
+	self._morphing = true
+	self._pill = false
+	self.Open = true
+	self._islandOpen = false
+	self._pillBtn.Visible = false
+	local root = self.Root
+	tween(self._islandLayer, { GroupTransparency = 1 }, .15)
+	tween(self._pillHint, { TextTransparency = 1 }, .12)
+	task.delay(.2, function() if not self._islandOpen then self._islandLayer.Visible = false end end)
+	tween(self._pillLayer, { GroupTransparency = 1 }, .15)
+	tween(self._pillGlow, { ImageTransparency = 1 }, .25)
+	tween(self.BodyStroke, { Color = Theme.Stroke }, .25)
+	tween(root, { Size = self._fullSize, Position = self._restorePos }, .75, LIQUID)
+	tween(self.Scale, { Scale = self._fitScale or 1 }, .7, SPRING)
+	tween(self.BodyCorner, { CornerRadius = UDim.new(0, 10) }, .65, LIQUID)
+	tween(self.Shadow, { ImageTransparency = .6 }, .5)
+	task.delay(.2, function() tween(self.Main, { GroupTransparency = 0 }, .4) end)
+	task.delay(.15, function() self._pillLayer.Visible = false end)
+	task.delay(.78, function()
+		self.Main.Size = UDim2.fromScale(1, 1)
+		self.ResizeHandle.Visible = true
+		self._morphing = false
+		self:_fitToScreen()
+		self:_clampToScreen()
+	end)
+end
+
+----------------------------------------------------------------------
+-- USAGE EXAMPLE
+----------------------------------------------------------------------
+--[[
+local Win = Library:Window {
+	Title = "Airflow", Subtitle = "liquid",
+	MobilePill = true,
+	Pill = {
+		Width = 330,
+		Stats = { "FPS", "Ping", "Time" },
+		Actions = {
+			{ Name = "Hide UI", Icon = "eye-off", Callback = function(w) w:_expand() w:Toggle(false) end },
+		},
+		Build = function(panel, win)
+			-- put anything you want here
+			local l = Instance.new("TextLabel")
+			l.Size = UDim2.new(1, 0, 0, 16)
+			l.BackgroundTransparency = 1
+			l.Text = "Hello from the pill"
+			l.TextColor3 = Color3.new(1, 1, 1)
+			l.TextSize = 13
+			l.Parent = panel
+		end,
+	},
+}
+
+local Tab = Win:Tab { Name = "Main", Icon = "house" }
+local combat = Tab:Section { Name = "Combat", Side = "Left" }          -- click header to fold
+local misc    = Tab:Section { Name = "Misc", Side = "Right", Collapsed = true }
+combat:Toggle { Name = "Aimbot" }
+
+Tab:SetColumnCollapsed("Right", false)   -- open/close a whole column from code
+]]
