@@ -1,0 +1,154 @@
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "MethionInstruction"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 999
+gui.Parent = playerGui
+
+local frame = Instance.new("Frame")
+frame.Name = "Main"
+frame.AnchorPoint = Vector2.new(0.5, 0.5)
+frame.Position = UDim2.fromScale(0.5, 0.5)
+frame.Size = UDim2.new(0.88, 0, 0, 195)
+frame.BackgroundColor3 = Color3.fromRGB(17, 17, 21)
+frame.BorderSizePixel = 0
+frame.Parent = gui
+
+local sizeLimit = Instance.new("UISizeConstraint")
+sizeLimit.MinSize = Vector2.new(240, 195)
+sizeLimit.MaxSize = Vector2.new(360, 195)
+sizeLimit.Parent = frame
+
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 12)
+corner.Parent = frame
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(85, 85, 98)
+stroke.Transparency = 0.3
+stroke.Thickness = 1
+stroke.Parent = frame
+
+local title = Instance.new("TextLabel")
+title.Position = UDim2.new(0, 18, 0, 16)
+title.Size = UDim2.new(1, -36, 0, 28)
+title.BackgroundTransparency = 1
+title.Text = "METHION"
+title.TextColor3 = Color3.fromRGB(240, 240, 245)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 19
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = frame
+
+local subtitle = Instance.new("TextLabel")
+subtitle.Position = UDim2.new(0, 18, 0, 49)
+subtitle.Size = UDim2.new(1, -36, 0, 22)
+subtitle.BackgroundTransparency = 1
+subtitle.Text = "Before you continue"
+subtitle.TextColor3 = Color3.fromRGB(170, 170, 185)
+subtitle.Font = Enum.Font.GothamMedium
+subtitle.TextSize = 12
+subtitle.TextXAlignment = Enum.TextXAlignment.Left
+subtitle.Parent = frame
+
+local instruction = Instance.new("TextLabel")
+instruction.Position = UDim2.new(0, 18, 0, 77)
+instruction.Size = UDim2.new(1, -36, 0, 48)
+instruction.BackgroundTransparency = 1
+instruction.Text = "If your microphone is muted, please unmute it first, then press Continue to bypass the VoiceChat."
+instruction.TextColor3 = Color3.fromRGB(220, 220, 230)
+instruction.Font = Enum.Font.Gotham
+instruction.TextSize = 13
+instruction.TextWrapped = true
+instruction.TextXAlignment = Enum.TextXAlignment.Left
+instruction.TextYAlignment = Enum.TextYAlignment.Top
+instruction.Parent = frame
+
+local continueButton = Instance.new("TextButton")
+continueButton.Position = UDim2.new(0, 18, 1, -52)
+continueButton.Size = UDim2.new(1, -36, 0, 36)
+continueButton.BackgroundColor3 = Color3.fromRGB(235, 235, 240)
+continueButton.Text = "Continue"
+continueButton.TextColor3 = Color3.fromRGB(20, 20, 24)
+continueButton.Font = Enum.Font.GothamBold
+continueButton.TextSize = 13
+continueButton.AutoButtonColor = true
+continueButton.BorderSizePixel = 0
+continueButton.Parent = frame
+
+local buttonCorner = Instance.new("UICorner")
+buttonCorner.CornerRadius = UDim.new(0, 8)
+buttonCorner.Parent = continueButton
+
+local closed = false
+
+local function hideUI()
+    if closed then
+        return
+    end
+
+    closed = true
+
+    local info = TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+    for _, obj in ipairs(gui:GetDescendants()) do
+        if obj:IsA("TextLabel") or obj:IsA("TextButton") then
+            TweenService:Create(obj, info, {
+                TextTransparency = 1,
+                BackgroundTransparency = 1
+            }):Play()
+        elseif obj:IsA("Frame") then
+            TweenService:Create(obj, info, {
+                BackgroundTransparency = 1
+            }):Play()
+        elseif obj:IsA("UIStroke") then
+            TweenService:Create(obj, info, {
+                Transparency = 1
+            }):Play()
+        end
+    end
+
+    task.wait(0.4)
+
+    if gui.Parent then
+        gui:Destroy()
+    end
+end
+
+continueButton.Activated:Connect(function()
+    if closed then
+        return
+    end
+
+    continueButton.Active = false
+    continueButton.Text = "Loading..."
+
+    task.spawn(function()
+        hideUI()
+
+        local success, err = pcall(function()
+            local source = game:HttpGet(
+                "https://raw.githubusercontent.com/Methions/modf/refs/heads/main/VcBypassbydiablo"
+            )
+
+            local execute = loadstring(source)
+            assert(execute, "Failed to compile VC Bypass script")
+
+            execute()
+        end)
+
+        if not success then
+            warn("[Methion] Failed to load VC Bypass: " .. tostring(err))
+        end
+    end)
+end)
+
+task.delay(50, function()
+    hideUI()
+end)
