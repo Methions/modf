@@ -1,0 +1,4058 @@
+local v1 = {}
+g_timeout = 30
+g_maxfinCnt = 100000
+g_startTime = 0
+g_finCnt = 0
+g_foundmove = 0
+g_foundvalue = 0
+colorBlack = 16
+colorWhite = 8
+pieceEmpty = 0
+piecePawn = 1
+pieceKnight = 2
+pieceBishop = 3
+pieceRook = 4
+pieceQueen = 5
+pieceKing = 6
+g_vectorDelta = {}
+g_bishopDeltas = {-15, -17, 15, 17}
+g_knightDeltas = {31, 33, 14, -14, -31, -33, 18, -18}
+g_rookDeltas = {-1, 1, -16, 16}
+g_queenDeltas = {-1, 1, -15, 15, -17, 17, -16, 16}
+g_seeValues = {0, 1, 3, 3, 5, 9, 900, 0, 0, 1, 3, 3, 5, 9, 900, 0}
+g_castleRightsMask = {
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    7,
+    15,
+    15,
+    15,
+    3,
+    15,
+    15,
+    11,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    15,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    13,
+    15,
+    15,
+    15,
+    12,
+    15,
+    15,
+    14,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+}
+moveflagEPC = 131072
+moveflagCastleKing = 262144
+moveflagCastleQueen = 524288
+moveflagPromotion = 1048576
+moveflagPromoteKnight = 2097152
+moveflagPromoteQueen = 4194304
+moveflagPromoteBishop = 8388608
+g_board = {}
+g_toMove = 0
+g_castleRights = 0
+g_enPassentSquare = 0
+g_baseEval = 0
+g_hashKeyLow = 0
+g_hashKeyHigh = 0
+g_inCheck = false
+g_moveCount = 0
+g_moveUndoStack = {}
+g_move50 = 0
+g_repMoveStack = {}
+g_hashSize = 4194304
+g_hashMask = g_hashSize - 1
+g_hashTable = {}
+g_killers = 0
+historyTable = {}
+g_zobristLow = {}
+g_zobristHigh = {}
+g_zobristBlackLow = 0
+g_zobristBlackHigh = 0
+g_mobUnit = {}
+hashflagAlpha = 1
+hashflagBeta = 2
+hashflagExact = 3
+g_nodeCount = 0
+g_qNodeCount = 0
+g_searchValid = true
+
+-- GarboChess runtime guard. The search and evaluation remain the original
+-- Garbo implementation; this layer only supplies time, node, cancel, and
+-- cooperative-yield controls expected by the shared chess main script.
+local GarboRuntime = {
+    Busy = false,
+    Options = {},
+    NodeLimit = 2500000,
+    YieldEvery = 64,
+    SliceTime = 0.004,
+    SliceTimeProvider = nil,
+    Cancel = nil,
+    NextPollNode = 0,
+    LastYieldAt = 0,
+    StopReason = nil,
+    LastStats = {},
+}
+
+local function GarboIsCancelled()
+    if type(GarboRuntime.Cancel) ~= "function" then
+        return false
+    end
+    local ok, cancelled = pcall(GarboRuntime.Cancel)
+    return not ok or cancelled == true
+end
+
+local function GarboPollSearch()
+    if not g_searchValid then
+        return true
+    end
+
+    local nodes = (tonumber(g_nodeCount) or 0) + (tonumber(g_qNodeCount) or 0)
+    if nodes < (GarboRuntime.NextPollNode or 0) then
+        return false
+    end
+    GarboRuntime.NextPollNode = nodes + math.max(16, GarboRuntime.YieldEvery or 64)
+
+    local now = os.clock()
+    if GarboIsCancelled() then
+        GarboRuntime.StopReason = "cancelled"
+        g_searchValid = false
+        return true
+    end
+
+    if GarboRuntime.NodeLimit > 0 and nodes >= GarboRuntime.NodeLimit then
+        GarboRuntime.StopReason = "node limit"
+        g_searchValid = false
+        return true
+    end
+
+    if g_timeout > 0 and now - g_startTime >= g_timeout then
+        GarboRuntime.StopReason = "time limit"
+        g_searchValid = false
+        return true
+    end
+
+    local slice = tonumber(GarboRuntime.SliceTime) or 0.004
+    if type(GarboRuntime.SliceTimeProvider) == "function" then
+        local ok, supplied = pcall(GarboRuntime.SliceTimeProvider)
+        if ok and tonumber(supplied) then
+            slice = tonumber(supplied)
+        end
+    end
+    slice = math.clamp(slice, 0.001, 0.020)
+
+    if now - (GarboRuntime.LastYieldAt or now) >= slice then
+        if task and type(task.wait) == "function" then
+            task.wait()
+        end
+        GarboRuntime.LastYieldAt = os.clock()
+
+        if GarboIsCancelled() then
+            GarboRuntime.StopReason = "cancelled"
+            g_searchValid = false
+            return true
+        end
+        if GarboRuntime.NodeLimit > 0 and nodes >= GarboRuntime.NodeLimit then
+            GarboRuntime.StopReason = "node limit"
+            g_searchValid = false
+            return true
+        end
+        if g_timeout > 0 and os.clock() - g_startTime >= g_timeout then
+            GarboRuntime.StopReason = "time limit"
+            g_searchValid = false
+            return true
+        end
+    end
+
+    return false
+end
+
+g_globalPly = 0
+minEval = -2000000
+maxEval = 2000000
+minMateBuffer = minEval + 2000
+maxMateBuffer = maxEval - 2000
+materialTable = {0, 800, 3350, 3450, 5000, 9750, 600000}
+pawnAdj = {
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    -25,
+    105,
+    135,
+    270,
+    270,
+    135,
+    105,
+    -25,
+    -80,
+    0,
+    30,
+    176,
+    176,
+    30,
+    0,
+    -80,
+    -85,
+    -5,
+    25,
+    175,
+    175,
+    25,
+    -5,
+    -85,
+    -90,
+    -10,
+    20,
+    125,
+    125,
+    20,
+    -10,
+    -90,
+    -95,
+    -15,
+    15,
+    75,
+    75,
+    15,
+    -15,
+    -95,
+    -100,
+    -20,
+    10,
+    70,
+    70,
+    10,
+    -20,
+    -100,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+}
+knightAdj = {
+    -200,
+    -100,
+    -50,
+    -50,
+    -50,
+    -50,
+    -100,
+    -200,
+    -100,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    -100,
+    -50,
+    0,
+    60,
+    60,
+    60,
+    60,
+    0,
+    -50,
+    -50,
+    0,
+    30,
+    60,
+    60,
+    30,
+    0,
+    -50,
+    -50,
+    0,
+    30,
+    60,
+    60,
+    30,
+    0,
+    -50,
+    -50,
+    0,
+    30,
+    30,
+    30,
+    30,
+    0,
+    -50,
+    -100,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    -100,
+    -200,
+    -50,
+    -25,
+    -25,
+    -25,
+    -25,
+    -50,
+    -200,
+}
+bishopAdj = {
+    -50,
+    -50,
+    -25,
+    -10,
+    -10,
+    -25,
+    -50,
+    -50,
+    -50,
+    -25,
+    -10,
+    0,
+    0,
+    -10,
+    -25,
+    -50,
+    -25,
+    -10,
+    0,
+    25,
+    25,
+    0,
+    -10,
+    -25,
+    -10,
+    0,
+    25,
+    40,
+    40,
+    25,
+    0,
+    -10,
+    -10,
+    0,
+    25,
+    40,
+    40,
+    25,
+    0,
+    -10,
+    -25,
+    -10,
+    0,
+    25,
+    25,
+    0,
+    -10,
+    -25,
+    -50,
+    -25,
+    -10,
+    0,
+    0,
+    -10,
+    -25,
+    -50,
+    -50,
+    -50,
+    -25,
+    -10,
+    -10,
+    -25,
+    -50,
+    -50,
+}
+rookAdj = {
+    -60,
+    -30,
+    -10,
+    20,
+    20,
+    -10,
+    -30,
+    -60,
+    40,
+    70,
+    90,
+    120,
+    120,
+    90,
+    70,
+    40,
+    -60,
+    -30,
+    -10,
+    20,
+    20,
+    -10,
+    -30,
+    -60,
+    -60,
+    -30,
+    -10,
+    20,
+    20,
+    -10,
+    -30,
+    -60,
+    -60,
+    -30,
+    -10,
+    20,
+    20,
+    -10,
+    -30,
+    -60,
+    -60,
+    -30,
+    -10,
+    20,
+    20,
+    -10,
+    -30,
+    -60,
+    -60,
+    -30,
+    -10,
+    20,
+    20,
+    -10,
+    -30,
+    -60,
+    -60,
+    -30,
+    -10,
+    20,
+    20,
+    -10,
+    -30,
+    -60,
+}
+kingAdj = {
+    50,
+    150,
+    -25,
+    -125,
+    -125,
+    -25,
+    150,
+    50,
+    50,
+    150,
+    -25,
+    -125,
+    -125,
+    -25,
+    150,
+    50,
+    50,
+    150,
+    -25,
+    -125,
+    -125,
+    -25,
+    150,
+    50,
+    50,
+    150,
+    -25,
+    -125,
+    -125,
+    -25,
+    150,
+    50,
+    50,
+    150,
+    -25,
+    -125,
+    -125,
+    -25,
+    150,
+    50,
+    50,
+    150,
+    -25,
+    -125,
+    -125,
+    -25,
+    150,
+    50,
+    50,
+    150,
+    -25,
+    -125,
+    -125,
+    -25,
+    150,
+    50,
+    150,
+    250,
+    75,
+    -25,
+    -25,
+    75,
+    250,
+    150,
+}
+emptyAdj = {
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+}
+pieceSquareAdj = {}
+flipTable = {}
+g_pieceIndex = {}
+g_pieceList = {}
+g_pieceCount = {}
+PieceCharList = {" ", "p", "n", "b", "r", "q", "k", " "}
+
+function FormatSquare(a1) -- Line: 203
+    return (string.char((bit32.band(a1, 15)) + 97 - 4))
+        .. string.format("%d", 9 - bit32.rshift(a1, 4) + 1)
+end
+
+function deFormatSquare(a1) -- Line: 209
+    return (bit32.bor(string.byte(a1, 1) - 97 + 4, (bit32.lshift(9 - ((string.byte(a1, 2)) - 48 - 1), 4))))
+end
+
+function iif(a1, a2, a3) -- Line: 219
+    if a1 then
+        return a2
+    end
+
+    return a3
+end
+
+function GetFen() -- Line: 227
+    local v1, v2, v3, v4
+    local v5 = ""
+    local v6 = 0
+
+    while v6 < 8 do
+        if v6 ~= 0 then
+            v5 = v5 .. "/"
+        end
+
+        v1 = 0
+        v2 = 0
+
+        while v2 < 8 do
+            v3 = g_board[bit32.lshift(v6 + 2, 4) + 1 + v2 + 4]
+
+            if v3 ~= 0 then
+                if v1 ~= 0 then
+                    v5 = v5 .. string.format("%d", v1)
+                end
+
+                v1 = 0
+                v4 = PieceCharList[bit32.band(v3, 7) + 1]
+                v5 = if bit32.band(v3, colorWhite) == 0 then
+                    v5 .. v4
+                else
+                    v5 .. string.upper(v4)
+            else
+                v1 = v1 + 1
+            end
+
+            v2 = v2 + 1
+        end
+
+        if v1 ~= 0 then
+            v5 = v5 .. string.format("%d", v1)
+        end
+
+        v6 = v6 + 1
+    end
+
+    local _iif = iif
+    v5 = (v5 .. _iif(0 < colorWhite, " w", "b")) .. " "
+
+    if g_castleRights ~= 0 then
+        if bit32.band(g_castleRights, 1) ~= 0 then
+            v5 = v5 .. "K"
+        end
+
+        if bit32.band(g_castleRights, 2) ~= 0 then
+            v5 = v5 .. "Q"
+        end
+
+        if bit32.band(g_castleRights, 4) ~= 0 then
+            v5 = v5 .. "k"
+        end
+
+        if bit32.band(g_castleRights, 8) ~= 0 then
+            v5 = v5 .. "q"
+        end
+    else
+        v5 = v5 .. "-"
+    end
+
+    v5 = v5 .. " "
+
+    if g_enPassentSquare < 1 then
+        return v5 .. "-"
+    end
+
+    return v5 .. FormatSquare(g_enPassentSquare)
+end
+
+function InitializeEval() -- Line: 301
+    local v1, v2, v3
+    g_mobUnit = {}
+
+    for i = 0, 1 do
+        g_mobUnit[i + 1] = {}
+        v2 = iif(i == 0, 16, 8)
+        v1 = iif(i == 0, 8, 16)
+        v3 = g_mobUnit[i + 1]
+        v3[1] = 1
+        v3 = g_mobUnit[i + 1]
+        v3[129] = 0
+        v3 = g_mobUnit[i + 1]
+        v3[bit32.bor(v2, piecePawn) + 1] = 1
+        v3 = g_mobUnit[i + 1]
+        v3[bit32.bor(v2, pieceBishop) + 1] = 1
+        v3 = g_mobUnit[i + 1]
+        v3[bit32.bor(v2, pieceKnight) + 1] = 1
+        v3 = g_mobUnit[i + 1]
+        v3[bit32.bor(v2, pieceRook) + 1] = 1
+        v3 = g_mobUnit[i + 1]
+        v3[bit32.bor(v2, pieceQueen) + 1] = 1
+        v3 = g_mobUnit[i + 1]
+        v3[bit32.bor(v2, pieceKing) + 1] = 1
+        v3 = g_mobUnit[i + 1]
+        v3[bit32.bor(v1, piecePawn) + 1] = 0
+        v3 = g_mobUnit[i + 1]
+        v3[bit32.bor(v1, pieceBishop) + 1] = 0
+        v3 = g_mobUnit[i + 1]
+        v3[bit32.bor(v1, pieceKnight) + 1] = 0
+        v3 = g_mobUnit[i + 1]
+        v3[bit32.bor(v1, pieceRook) + 1] = 0
+        v3 = g_mobUnit[i + 1]
+        v3[bit32.bor(v1, pieceQueen) + 1] = 0
+        v3 = g_mobUnit[i + 1]
+        v3[bit32.bor(v1, pieceKing) + 1] = 0
+    end
+end
+
+function HashEntry(a1, a2, a3, a4, a5, a6) -- Line: 334
+    return {
+        lock = a1,
+        value = a2,
+        flags = a3,
+        hashDepth = a4,
+        bestMove = a5,
+    }
+end
+
+function StoreHash(a1, a2, a3, a4, a5) -- Line: 346
+    if maxMateBuffer <= a1 then
+        a1 = a1 + a5
+    elseif a1 <= minMateBuffer then
+        a1 = a1 - a5
+    end
+
+    local _g_hashTable = g_hashTable
+    local v1 = bit32.band(g_hashKeyLow, g_hashMask) + 1
+    _g_hashTable[v1] = (HashEntry(g_hashKeyHigh, a1, a2, a3, a4))
+end
+
+function SetHash() -- Line: 361
+    local v1
+    local v2 = {hashKeyLow = 0, hashKeyHigh = 0}
+
+    for i = 0, 255 do
+        v1 = g_board[i + 1]
+
+        if 0 < (bit32.band(v1, 24)) then
+            v2.hashKeyLow = bit32.bxor(v2.hashKeyLow, g_zobristLow[i + 1][(bit32.band(v1, 15)) + 1])
+            v2.hashKeyHigh = bit32.bxor(v2.hashKeyHigh, g_zobristHigh[i + 1][(bit32.band(v1, 15)) + 1])
+        end
+    end
+
+    if g_toMove == 0 then
+        v2.hashKeyLow = bit32.bxor(v2.hashKeyLow, g_zobristBlackLow)
+        v2.hashKeyHigh = bit32.bxor(v2.hashKeyHigh, g_zobristBlackHigh)
+    end
+
+    return v2
+end
+
+function MakeTable(a1) -- Line: 387
+    local v1
+    local v2 = {}
+
+    for i = 0, 255 do
+        v2[i + 1] = 0
+    end
+
+    for j = 0, 7 do
+        for k = 0, 7 do
+            v1 = 1 + MakeSquare(j, k)
+            v2[v1] = a1[j * 8 + k + 1]
+        end
+    end
+
+    return v2
+end
+
+function MakeSquare(a1, a2) -- Line: 405
+    return (bit32.bor(bit32.lshift(a1 + 2, 4), a2 + 4))
+end
+
+function InitializeFromFen(a1) -- Line: 410
+    local _g_board, _g_board_2, v1, v2, v3, v4, v5, v6
+    local v7 = {}
+    local v8 = a1
+
+    while true do
+        if not (0 < (string.len(v8))) then
+            break
+        end
+
+        v6 = string.find(v8, " ")
+
+        if v6 ~= nil then
+            table.insert(v7, (string.sub(v8, 1, v6 - 1)))
+
+            v8 = string.sub(v8, v6 + 1)
+        else
+            table.insert(v7, v8)
+
+            v8 = ""
+        end
+    end
+
+    for i = 0, 255 do
+        g_board[i + 1] = 128
+    end
+
+    local v9 = 0
+    local v10 = 0
+    local v11 = v7[1]
+    local v12 = string.len(v11) - 1
+
+    for j = 0, v12 do
+        v3 = string.sub(v11, j + 1, j + 1)
+
+        if v3 == "/" then
+            v9 = v9 + 1
+            v10 = 0
+        elseif not (v3 >= "0") or not (v3 <= "9") then
+            v1 = false
+
+            if v3 >= "a" then
+                v1 = v3 <= "z"
+            end
+
+            v4 = v1
+            v5 = iif(v4, colorBlack, colorWhite)
+
+            if not v4 then
+                v3 = string.sub(string.lower(v11), j + 1, j + 1)
+            end
+
+            if v3 == "p" then
+                v5 = bit32.bor(v5, piecePawn)
+            end
+
+            if v3 == "b" then
+                v5 = bit32.bor(v5, pieceBishop)
+            end
+
+            if v3 == "n" then
+                v5 = bit32.bor(v5, pieceKnight)
+            end
+
+            if v3 == "r" then
+                v5 = bit32.bor(v5, pieceRook)
+            end
+
+            if v3 == "q" then
+                v5 = bit32.bor(v5, pieceQueen)
+            end
+
+            if v3 == "k" then
+                v5 = bit32.bor(v5, pieceKing)
+            end
+
+            _g_board_2 = g_board
+            v2 = (v9 + 2) * 16 + 1
+            _g_board_2[v2 + (v10 + 4)] = v5
+            v10 = v10 + 1
+        else
+            v1 = tonumber(v3) - 1
+
+            for k = 0, v1 do
+                _g_board = g_board
+                _g_board[(v9 + 2) * 16 + 1 + (v10 + 4)] = 0
+                v10 = v10 + 1
+            end
+        end
+    end
+
+    InitializePieceList()
+    -- API mode: keep board initialization local; no game remote is required.
+
+    g_toMove = iif(v7[2] == "w", colorWhite, 0)
+    g_castleRights = 0
+
+    if string.find(v7[3], "K") ~= nil then
+        g_castleRights = bit32.bor(g_castleRights, 1)
+    end
+
+    if string.find(v7[3], "Q") ~= nil then
+        g_castleRights = bit32.bor(g_castleRights, 2)
+    end
+
+    if string.find(v7[3], "k") ~= nil then
+        g_castleRights = bit32.bor(g_castleRights, 4)
+    end
+
+    if string.find(v7[3], "q") ~= nil then
+        g_castleRights = bit32.bor(g_castleRights, 8)
+    end
+
+    g_enPassentSquare = -1
+
+    if string.find(v7[4], "-") == nil then
+        g_enPassentSquare = deFormatSquare(v7[4])
+    end
+
+    v6 = SetHash()
+    g_hashKeyLow = v6.hashKeyLow
+    g_hashKeyHigh = v6.hashKeyHigh
+    g_baseEval = 0
+
+    for n = 0, 255 do
+        if 0 < (bit32.band(g_board[n + 1], colorWhite)) then
+            g_baseEval = g_baseEval
+                + pieceSquareAdj[bit32.band(g_board[n + 1], 7) + 1][n + 1]
+            g_baseEval = g_baseEval + materialTable[bit32.band(g_board[n + 1], 7) + 1]
+        elseif 0 < (bit32.band(g_board[n + 1], colorBlack)) then
+            g_baseEval = g_baseEval
+                - pieceSquareAdj[bit32.band(g_board[n + 1], 7) + 1][1 + flipTable[n + 1]]
+            g_baseEval = g_baseEval - materialTable[bit32.band(g_board[n + 1], 7) + 1]
+        end
+    end
+
+    if g_toMove == 0 then
+        g_baseEval = -g_baseEval
+    end
+
+    g_move50 = 0
+    g_inCheck = IsSquareAttackable(g_pieceList[bit32.lshift(bit32.bor(g_toMove, pieceKing), 4) + 1], 8 - g_toMove)
+end
+
+function IsSquareAttackableFrom(a1, a2) -- Line: 551
+    local v1 = a2 - a1 + 128
+    local v2 = g_board[1 + a2]
+
+    if not (0
+        < (bit32.band(g_vectorDelta[1 + v1].pieceMask[bit32.band(bit32.rshift(v2, 3), 1) + 1], (bit32.lshift(1, (bit32.band(v2, 7))))))) then
+        return false
+    end
+
+    local delta = g_vectorDelta[1 + v1].delta
+    local v3 = a2
+
+    while true do
+        v3 = v3 + delta
+
+        if v3 == a1 then
+            break
+        end
+
+        if g_board[1 + v3] ~= 0 then
+            return false
+        end
+    end
+
+    return true
+end
+
+function IsSquareAttackable(a1, a2) -- Line: 577
+    if type(a1) ~= "number" or type(a2) ~= "number" then
+        return false
+    end
+
+    local v1, v2
+    local v3 = iif(a2 > 0, -16, 16)
+    local v4 = bit32.bor(iif(a2 > 0, colorWhite, colorBlack), 1)
+
+    if g_board[1 + a1 - (v3 - 1)] == v4 or g_board[1 + a1 - (v3 + 1)] == v4 then
+        return true
+    end
+
+    for i = 2, 6 do
+        v1 = bit32.lshift(bit32.bor(a2, i), 4)
+        v2 = g_pieceList[v1 + 1]
+
+        while v2 ~= 0 do
+            if IsSquareAttackableFrom(a1, v2) then
+                return true
+            end
+
+            v1 = v1 + 1
+            v2 = g_pieceList[v1 + 1]
+        end
+    end
+
+    return false
+end
+
+function IsHashMoveValid(a1) -- Line: 609
+    local v1 = bit32.band(a1, 255)
+    local v2 = bit32.band(bit32.rshift(a1, 8), 255)
+    local v3 = v2 - v1
+    local v4 = g_board[v1 + 1]
+    local v5 = bit32.band(v4, 7)
+
+    if not (v5 < piecePawn) and not (pieceKing < v5) then
+        local v6
+
+        if g_toMove ~= bit32.band(v4, 8) then
+            return false
+        end
+
+        if g_board[v2 + 1] ~= 0 and g_toMove == bit32.band(g_board[v2 + 1], 8) then
+            return false
+        end
+
+        if v5 ~= piecePawn then
+            if 0 < (bit32.rshift(a1, 16)) then
+                return false
+            end
+
+            return IsSquareAttackableFrom(v2, v1)
+        end
+
+        if (bit32.band(a1, moveflagEPC)) > 0 then
+            return false
+        end
+
+        if g_toMove == colorWhite ~= (v3 < 0) then
+            return false
+        end
+
+        local v7 = bit32.band(v2, 240)
+
+        if v7 ~= 144 then
+            v6 = false
+
+            if v7 == 32 then
+                v6 = 0 < g_toMove
+            end
+        else
+            v6 = true
+
+            if g_toMove ~= 0 then
+                v6 = false
+
+                if v7 == 32 then
+                    v6 = 0 < g_toMove
+                end
+            end
+        end
+
+        if v6 ~= (0 < (bit32.band(a1, moveflagPromotion))) then
+            return false
+        end
+
+        if v3 ~= -16 and v3 ~= 16 then
+            if v3 ~= -15 and v3 ~= -17 and v3 ~= 15 and v3 ~= 17 then
+                if v3 == -32 then
+                    if v7 ~= 96 or g_board[v2 + 1] ~= 0 or g_board[v1 - 16 + 1] ~= 0 then
+                        return false
+                    end
+
+                    return true
+                end
+
+                if v3 ~= 32
+                    or v7 ~= 80
+                    or g_board[v2 + 1] ~= 0
+                    or g_board[v1 + 16 + 1] ~= 0 then
+                    return false
+                end
+
+                return true
+            end
+
+            return g_board[v2 + 1] ~= 0
+        end
+
+        return g_board[v2 + 1] == 0
+    end
+
+    return false
+end
+
+function IsRepDraw() -- Line: 701
+    local v1 = g_moveCount - 5
+    local v2 = g_moveCount - 1 - g_move50
+    local v3 = iif(v2 < 0, 0, v2)
+
+    while v3 <= v1 do
+        if g_repMoveStack[1 + v1] == g_hashKeyLow then
+            return true
+        end
+
+        v1 = v1 - 2
+    end
+
+    return false
+end
+
+function MovePicker(a1, a2, a3, a4, a5) -- Line: 717
+    a1.hashMove = a2
+    a1.depth = a3
+    a1.killer1 = a4
+    a1.killer2 = a5
+    a1.moves = {}
+    a1.losingCaptures = nil
+    a1.moveCount = 0
+    a1.atMove = -1
+    a1.moveScores = nil
+    a1.stage = 0
+end
+
+function nextMove(a1) -- Line: 733
+    local v1, v2, v3
+    a1.atMove = a1.atMove + 1
+
+    if a1.atMove == a1.moveCount then
+        a1.stage = a1.stage + 1
+
+        if a1.stage == 1 then
+            if a1.hashMove ~= nil and IsHashMoveValid(a1.hashMove) then
+                a1.moves[1] = a1.hashMove
+                a1.moveCount = 1
+            end
+
+            if a1.moveCount ~= 1 then
+                a1.hashMove = nil
+                a1.stage = a1.stage + 1
+            end
+        end
+
+        if a1.stage == 2 then
+            local v4, v5
+            GenerateCaptureMoves(a1.moves)
+
+            a1.moveCount = #a1.moves
+            a1.moveScores = {}
+            local atMove = a1.atMove
+            v2 = a1.moveCount - 1
+
+            for i = atMove, v2 do
+                v4 = bit32.band(g_board[bit32.band(bit32.rshift(a1.moves[i + 1], 8), 255) + 1], 7)
+                v5 = bit32.band(g_board[bit32.band(a1.moves[i + 1], 255) + 1], 7)
+                a1.moveScores[i + 1] = bit32.lshift(v4, 5) - v5
+            end
+
+            if a1.atMove == a1.moveCount then
+                a1.stage = a1.stage + 1
+            end
+        end
+
+        if a1.stage == 3 then
+            if not IsHashMoveValid(a1.killer1) or a1.killer1 == a1.hashMove then
+                a1.killer1 = 0
+                a1.stage = a1.stage + 1
+            else
+                local moves = a1.moves
+                v3 = #a1.moves + 1
+                moves[v3] = a1.killer1
+                a1.moveCount = #a1.moves
+            end
+        end
+
+        if a1.stage == 4 then
+            if not IsHashMoveValid(a1.killer2) or a1.killer2 == a1.hashMove then
+                a1.killer2 = 0
+                a1.stage = a1.stage + 1
+            else
+                local moves_2 = a1.moves
+                v3 = #a1.moves + 1
+                moves_2[v3] = a1.killer2
+                a1.moveCount = #a1.moves
+            end
+        end
+
+        if a1.stage == 5 then
+            GenerateAllMoves(a1.moves)
+
+            a1.moveCount = #a1.moves
+            local atMove_2 = a1.atMove
+            v2 = a1.moveCount - 1
+
+            for j = atMove_2, v2 do
+                a1.moveScores[j + 1] = (ScoreMove(a1.moves[j + 1]))
+            end
+
+            if a1.atMove == a1.moveCount then
+                a1.stage = a1.stage + 1
+            end
+        end
+
+        if a1.stage == 6 then
+            if a1.losingCaptures ~= nil then
+                local moves_3, v6
+                v2 = #a1.losingCaptures - 1
+
+                for k = 0, v2 do
+                    moves_3 = a1.moves
+                    v6 = #a1.moves + 1
+                    moves_3[v6] = a1.losingCaptures[k + 1]
+                end
+
+                local atMove_3 = a1.atMove
+                v2 = a1.moveCount - 1
+
+                for n = atMove_3, v2 do
+                    a1.moveScores[n + 1] = (ScoreMove(a1.moves[n + 1]))
+                end
+
+                a1.moveCount = #a1.moves
+            end
+
+            if a1.atMove == a1.moveCount then
+                a1.stage = a1.stage + 1
+            end
+        end
+
+        if a1.stage == 7 then
+            return 0
+        end
+    end
+
+    local atMove_4 = a1.atMove
+    local v7 = a1.atMove + 1
+    v2 = a1.moveCount - 1
+
+    for m = v7, v2 do
+        if a1.moveScores[m + 1] == nil then
+            break
+        end
+
+        v1 = a1.moveScores[m + 1]
+
+        if a1.moveScores[atMove_4 + 1] < v1 then
+            atMove_4 = m
+        end
+    end
+
+    if atMove_4 ~= a1.atMove then
+        local v8 = a1.moves[1 + a1.atMove]
+        local moves_4 = a1.moves
+        v3 = 1 + a1.atMove
+        moves_4[v3] = a1.moves[atMove_4 + 1]
+        a1.moves[atMove_4 + 1] = v8
+        local v9 = a1.moveScores[1 + a1.atMove]
+        local moveScores = a1.moveScores
+        v3 = 1 + a1.atMove
+        moveScores[v3] = a1.moveScores[atMove_4 + 1]
+        a1.moveScores[atMove_4 + 1] = v9
+    end
+
+    local v10 = a1.moves[1 + a1.atMove]
+
+    if 1 < a1.stage and v10 == a1.hashMove then
+        return nextMove(a1)
+    end
+
+    if 3 < a1.stage and v10 == a1.killer1 then
+        return nextMove(a1)
+    end
+
+    if 4 < a1.stage and v10 == a1.killer2 then
+        return nextMove(a1)
+    end
+
+    if a1.stage == 2 and not See(v10) then
+        if a1.losingCaptures == nil then
+            a1.losingCaptures = {}
+        end
+
+        a1.losingCaptures[#a1.losingCaptures + 1] = v10
+
+        return nextMove(a1)
+    end
+
+    return a1.moves[1 + a1.atMove]
+end
+
+function AllCutNode(a1, a2, a3, a4) -- Line: 872
+    local _iif_3, _minEval, v1, v2, v3, v4, v5, v6, v7, v8
+    local bestMove = nil
+    local v9 = 2500 + 200 * a1
+    local v10 = 0
+    local v11 = {}
+
+    if a1 <= 0 then
+        return QSearch(a3 - 1, a3, 0)
+    end
+
+    local v12 = os.clock() - g_startTime
+
+    if g_timeout < v12 then
+        GarboRuntime.StopReason = "time limit"
+        g_searchValid = false
+        return a3 - 1
+    end
+
+    local _g_finCnt = g_finCnt
+
+    if g_maxfinCnt < _g_finCnt then
+        GarboRuntime.StopReason = "legacy node guard"
+        g_searchValid = false
+        return a3 - 1
+    end
+
+    g_nodeCount = g_nodeCount + 1
+
+    if GarboPollSearch() then
+        return a3 - 1
+    end
+
+    if IsRepDraw() then
+        return 0
+    end
+
+    if a3 <= minEval + a2 then
+        return a3
+    end
+
+    if maxEval - (a2 + 1) < a3 then
+        return a3 - 1
+    end
+
+    local v13 = g_hashTable[bit32.band(g_hashKeyLow, g_hashMask) + 1]
+
+    if v13 ~= nil and v13.lock == g_hashKeyHigh then
+        bestMove = v13.bestMove
+
+        if a1 <= v13.hashDepth then
+            local value = v13.value
+
+            if maxMateBuffer <= value then
+                value = value - a2
+            elseif value <= minMateBuffer then
+                value = value + a2
+            end
+
+            if v13.flags == hashflagExact then
+                return value
+            end
+
+            if v13.flags == hashflagAlpha and value < a3 then
+                return value
+            end
+
+            if v13.flags == hashflagBeta and a3 <= value then
+                return value
+            end
+        end
+    end
+
+    if not g_inCheck and a4 and minMateBuffer < a3 and a3 < maxMateBuffer then
+        if bestMove == nil and a1 < 4 and g_baseEval < a3 - v9 then
+            local v14 = a3 - v9
+            local v15 = QSearch(v14 - 1, v14, 0)
+
+            if v15 < v14 then
+                return v15
+            end
+        end
+
+        if a1 > 1 then
+            local _g_baseEval = g_baseEval
+            local _iif = iif
+
+            if a3 - _iif(a1 >= 4, 2500, 0) <= _g_baseEval then
+                if g_pieceCount[bit32.bor(pieceBishop, g_toMove) + 1] == 0
+                    and g_pieceCount[bit32.bor(pieceKnight, g_toMove) + 1] == 0
+                    and g_pieceCount[bit32.bor(pieceRook, g_toMove) + 1] == 0
+                    and g_pieceCount[bit32.bor(pieceQueen, g_toMove) + 1] == 0 then
+                    v1 = false
+                    _minEval = minEval
+
+                    MovePicker(v11, bestMove, a2, g_killers[1 + a2][1], g_killers[1 + a2][2])
+
+                    while true do
+                        v2 = nextMove(v11)
+
+                        if v2 == 0 then
+                            break
+                        end
+
+                        v3 = a1 - 1
+
+                        if MakeMove(v2) then
+                            v4 = true
+
+                            if g_inCheck then
+                                v3 = v3 + 1
+                            elseif v11.stage == 5 and 5 < v11.atMove and a1 >= 3 then
+                                _iif_3 = iif
+                                v5 = v3 - _iif_3(14 < v11.atMove, 2, 1)
+                                v10 = -AllCutNode(v5, a2 + 1, -(a3 - 1), true)
+                                v4 = a3 <= v10
+                            end
+
+                            if v4 then
+                                v10 = -AllCutNode(v3, a2 + 1, -(a3 - 1), true)
+                            end
+
+                            v1 = true
+                            UnmakeMove(v2)
+
+                            if not g_searchValid then
+                                return a3 - 1
+                            end
+
+                            if _minEval < v10 then
+                                if a3 <= v10 then
+                                    v6 = bit32.band(bit32.rshift(v2, 8), 255)
+
+                                    if g_board[v6 + 1] == 0 then
+                                        v7 = bit32.band(g_board[bit32.band(v2, 255) + 1], 15)
+                                        v8 = historyTable[v7 + 1][v6 + 1] + a1 * a1
+
+                                        if v8 > 32767 then
+                                            v8 = bit32.rshift(v8, 1)
+                                        end
+
+                                        v12 = historyTable[v7 + 1]
+                                        v12[v6 + 1] = v8
+
+                                        if g_killers[1 + a2][1] ~= v2 then
+                                            v12 = g_killers[1 + a2]
+                                            v12[2] = g_killers[1 + a2][1]
+                                            g_killers[1 + a2][1] = v2
+                                        end
+                                    end
+
+                                    StoreHash(v10, hashflagBeta, a1, v2, a2)
+
+                                    return v10
+                                end
+
+                                _minEval = v10
+                                bestMove = v2
+                            end
+                        end
+                    end
+
+                    if v1 then
+                        StoreHash(_minEval, hashflagAlpha, a1, bestMove, a2)
+                        return _minEval
+                    end
+
+                    if g_inCheck then
+                        return minEval + a2
+                    end
+
+                    return 0
+                end
+
+                local _iif_2 = iif
+                local v16 = 3 + _iif_2(a1 >= 5, 1, a1 / 4)
+
+                if 1500 < g_baseEval - a3 then
+                    v16 = v16 + 1
+                end
+
+                g_toMove = 8 - g_toMove
+                g_baseEval = -g_baseEval
+                g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristBlackLow)
+                g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristBlackHigh)
+                v10 = -AllCutNode(a1 - v16, a2 + 1, -(a3 - 1), false)
+                g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristBlackLow)
+                g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristBlackHigh)
+                g_toMove = 8 - g_toMove
+                g_baseEval = -g_baseEval
+
+                if a3 <= v10 then
+                    return a3
+                end
+            end
+        end
+    end
+
+    v1 = false
+    _minEval = minEval
+
+    MovePicker(v11, bestMove, a2, g_killers[1 + a2][1], g_killers[1 + a2][2])
+
+    while true do
+        v2 = nextMove(v11)
+
+        if v2 == 0 then
+            break
+        end
+
+        v3 = a1 - 1
+
+        if MakeMove(v2) then
+            v4 = true
+
+            if g_inCheck then
+                v3 = v3 + 1
+            elseif v11.stage == 5 and 5 < v11.atMove and a1 >= 3 then
+                _iif_3 = iif
+                v5 = v3 - _iif_3(14 < v11.atMove, 2, 1)
+                v10 = -AllCutNode(v5, a2 + 1, -(a3 - 1), true)
+                v4 = a3 <= v10
+            end
+
+            if v4 then
+                v10 = -AllCutNode(v3, a2 + 1, -(a3 - 1), true)
+            end
+
+            v1 = true
+            UnmakeMove(v2)
+
+            if not g_searchValid then
+                return a3 - 1
+            end
+
+            if _minEval < v10 then
+                if a3 <= v10 then
+                    v6 = bit32.band(bit32.rshift(v2, 8), 255)
+
+                    if g_board[v6 + 1] == 0 then
+                        v7 = bit32.band(g_board[bit32.band(v2, 255) + 1], 15)
+                        v8 = historyTable[v7 + 1][v6 + 1] + a1 * a1
+
+                        if v8 > 32767 then
+                            v8 = bit32.rshift(v8, 1)
+                        end
+
+                        v12 = historyTable[v7 + 1]
+                        v12[v6 + 1] = v8
+
+                        if g_killers[1 + a2][1] ~= v2 then
+                            v12 = g_killers[1 + a2]
+                            v12[2] = g_killers[1 + a2][1]
+                            g_killers[1 + a2][1] = v2
+                        end
+                    end
+
+                    StoreHash(v10, hashflagBeta, a1, v2, a2)
+
+                    return v10
+                end
+
+                _minEval = v10
+                bestMove = v2
+            end
+        end
+    end
+
+    if v1 then
+        StoreHash(_minEval, hashflagAlpha, a1, bestMove, a2)
+        return _minEval
+    end
+
+    if g_inCheck then
+        return minEval + a2
+    end
+
+    return 0
+end
+
+function AlphaBeta(a1, a2, a3, a4) -- Line: 1096
+    local v1, v2, v3, v4, v5
+    local bestMove = nil
+    local _hashflagAlpha = hashflagAlpha
+    local v6 = a1 - 1
+    local v7 = {}
+
+    if a1 <= 0 then
+        return QSearch(a3, a4, 0)
+    end
+
+    g_nodeCount = g_nodeCount + 1
+
+    if GarboPollSearch() then
+        return 0
+    end
+
+    if a2 > 0 and IsRepDraw() then
+        return 0
+    end
+
+    local v8 = iif(a3 < minEval + a2, a3, minEval + a2)
+    local v9 = iif(maxEval - (a2 + 1) < a4, a4, maxEval - (a2 + 1))
+
+    if v9 <= v8 then
+        return v8
+    end
+
+    local v10 = g_hashTable[bit32.band(g_hashKeyLow, g_hashMask) + 1]
+
+    if v10 ~= nil and v10.lock == g_hashKeyHigh then
+        bestMove = v10.bestMove
+    end
+
+    local _g_inCheck = g_inCheck
+    local v11 = false
+    local _minEval = minEval
+
+    MovePicker(v7, bestMove, a2, g_killers[1 + a2][1], g_killers[1 + a2][2])
+
+    local v12, v13 = a1, a2
+
+    while true do
+        v1 = nextMove(v7)
+
+        if v1 == 0 then
+            break
+        end
+
+        v6 = v12 - 1
+
+        if MakeMove(v1) then
+            if g_inCheck then
+                v6 = v6 + 1
+            end
+
+            if not v11 or v8 < -AllCutNode(v6, v13 + 1, -v8, true) then
+                v2 = -AlphaBeta(v6, v13 + 1, -v9, -v8)
+            end
+
+            v11 = true
+            UnmakeMove(v1)
+
+            if not g_searchValid then
+                return v8
+            end
+
+            if _minEval < v2 then
+                if v9 <= v2 then
+                    v3 = bit32.band(bit32.rshift(v1, 8), 255)
+
+                    if g_board[v3 + 1] == 0 then
+                        v4 = bit32.band(g_board[bit32.band(v1, 255) + 1], 15)
+                        v10 = historyTable[v4 + 1][v3 + 1] + v12 * v12
+
+                        if v10 > 32767 then
+                            v10 = bit32.rshift(v10, 1)
+                        end
+
+                        v5 = historyTable[v4 + 1]
+                        v5[v3 + 1] = v10
+
+                        if g_killers[1 + v13][1] ~= v1 then
+                            v5 = g_killers[1 + v13]
+                            v5[2] = g_killers[1 + v13][1]
+                            g_killers[1 + v13][1] = v1
+                        end
+                    end
+
+                    StoreHash(v2, hashflagBeta, v12, v1, v13)
+
+                    return v2
+                end
+
+                if a3 < v2 then
+                    _hashflagAlpha = hashflagExact
+                    v8 = v2
+                end
+
+                _minEval = v2
+                bestMove = v1
+            end
+        end
+    end
+
+    if v11 then
+        StoreHash(_minEval, _hashflagAlpha, v12, bestMove, v13)
+        return _minEval
+    end
+
+    if _g_inCheck then
+        return minEval + v13
+    end
+
+    return 0
+end
+
+function InitializePieceList() -- Line: 1230
+    local _g_pieceList, _g_pieceList_2, v1, v2, v3
+
+    for i = 0, 15 do
+        g_pieceCount[i + 1] = 0
+
+        for j = 0, 15 do
+            _g_pieceList = g_pieceList
+            _g_pieceList[bit32.bor(bit32.lshift(i, 4), j) + 1] = 0
+        end
+    end
+
+    for k = 0, 255 do
+        g_pieceIndex[k + 1] = 0
+
+        if 0 < (bit32.band(g_board[k + 1], (bit32.bor(colorWhite, colorBlack)))) then
+            v1 = bit32.band(g_board[k + 1], 15)
+            _g_pieceList_2 = g_pieceList
+            v2 = bit32.lshift(v1, 4)
+            v3 = g_pieceCount[v1 + 1]
+            _g_pieceList_2[bit32.bor(v2, v3) + 1] = k
+            g_pieceIndex[k + 1] = g_pieceCount[v1 + 1]
+            g_pieceCount[v1 + 1] = g_pieceCount[v1 + 1] + 1
+        end
+    end
+end
+
+mt = {}
+mt.N = 624
+mt.M = 397
+local _mt = mt
+_mt.MAG01 = {0, 2567483615}
+mt.mt = {}
+mt.mti = mt.N + 1
+
+function mt.setSeed(a1) -- Line: 1269
+    local mt_2, v1, v2
+    mt.mt[1] = a1
+    local v3 = mt.N - 1
+
+    for i = 1, v3 do
+        v1 = bit32.bxor(mt.mt[i - 1 + 1], (bit32.rshift(mt.mt[i - 1 + 1], 30)))
+        mt_2 = mt.mt
+        v2 = i + 1
+        mt_2[v2] = (bit32.lshift(bit32.rshift(bit32.band(v1, 4294901760), 16) * 1812433253, 16))
+            + bit32.band(v1, 65535) * 1812433253
+            + i
+    end
+
+    mt.mti = mt.N
+end
+
+function mt.next(a1) -- Line: 1282
+    local mti = mt.mti
+
+    if mt.N <= mti then
+        local mt_2, mt_3, v1, v2
+        local v3 = mt.N - mt.M - 1
+
+        for i = 0, v3 do
+            v1 = bit32.bor(bit32.band(mt.mt[i + 1], 2147483648), (bit32.band(mt.mt[i + 1 + 1], 2147483647)))
+            mt_2 = mt.mt
+            v2 = i + 1
+            mt_2[v2] = (bit32.bxor((bit32.bxor(mt.mt[1 + (i + mt.M)], bit32.rshift(v1, 1), mt.MAG01[(bit32.band(v1, 1)) + 1]))))
+        end
+
+        local v4 = mt.N - mt.M
+        v3 = mt.N - 1 - 1
+
+        for j = v4, v3 do
+            v1 = bit32.bor(bit32.band(mt.mt[j + 1], 2147483648), (bit32.band(mt.mt[j + 1 + 1], 2147483647)))
+            mt_3 = mt.mt
+            v2 = j + 1
+            mt_3[v2] = (bit32.bxor((bit32.bxor(mt.mt[j + 1 + (mt.M - mt.N)], bit32.rshift(v1, 1), mt.MAG01[(bit32.band(v1, 1)) + 1]))))
+        end
+
+        v1 = bit32.bor(bit32.band(mt.mt[1 + (mt.N - 1)], 2147483648), (bit32.band(mt.mt[1], 2147483647)))
+        local mt_4 = mt.mt
+        local v5 = 1 + (mt.N - 1)
+        mt_4[v5] = (bit32.bxor((bit32.bxor(mt.mt[1 + (mt.M - 1)], bit32.rshift(v1, 1), mt.MAG01[(bit32.band(v1, 1)) + 1]))))
+        mt.mti = 0
+    end
+
+    local v6 = mt.mt[1 + mt.mti]
+    mt.mti = mt.mti + 1
+    v6 = bit32.bxor(v6, (bit32.rshift(v6, 11)))
+    v6 = bit32.bxor(v6, (bit32.band(bit32.lshift(v6, 7), 2636928640)))
+    v6 = bit32.bxor(v6, (bit32.band(bit32.lshift(v6, 15), 4022730752)))
+
+    return (bit32.band(bit32.rshift(bit32.bxor(v6, (bit32.rshift(v6, 18))), 32 - a1), 4294967295))
+end
+
+function ResetGame() -- Line: 1320
+    local _g_killers, _pieceKing, _pieceKnight, pieceMask, pieceMask_3, pieceMask_5, pieceMask_6, pieceMask_7,
+        pieceMask_9, v1, v2, v3, v4, v5, v6, v7, v8, v9
+    mt.setSeed(464384013)
+
+    g_killers = {}
+
+    for i = 0, 127 do
+        _g_killers = g_killers
+        _g_killers[i + 1] = {0, 0}
+    end
+
+    g_hashTable = {}
+
+    for j = 0, 31 do
+        historyTable[j + 1] = {}
+
+        for k = 0, 255 do
+            v4 = historyTable[j + 1]
+            v4[k + 1] = 0
+        end
+    end
+
+    g_zobristLow = {}
+    g_zobristHigh = {}
+
+    for n = 0, 255 do
+        g_zobristLow[n + 1] = {}
+        g_zobristHigh[n + 1] = {}
+
+        for m = 0, 15 do
+            v4 = g_zobristLow[n + 1]
+            v4[m + 1] = (mt.next(32))
+            v4 = g_zobristHigh[n + 1]
+            v4[m + 1] = (mt.next(32))
+        end
+    end
+
+    g_zobristBlackLow = mt.next(32)
+    g_zobristBlackHigh = mt.next(32)
+
+    for i5 = 0, 7 do
+        for i6 = 0, 7 do
+            v5 = MakeSquare(i5, i6)
+            flipTable[v5 + 1] = (MakeSquare(7 - i5, i6))
+        end
+    end
+
+    local _pieceSquareAdj = pieceSquareAdj
+    local v10 = 1 + piecePawn
+    _pieceSquareAdj[v10] = (MakeTable(pawnAdj))
+    local _pieceSquareAdj_2 = pieceSquareAdj
+    v10 = 1 + pieceKnight
+    _pieceSquareAdj_2[v10] = (MakeTable(knightAdj))
+    local _pieceSquareAdj_3 = pieceSquareAdj
+    v10 = 1 + pieceBishop
+    _pieceSquareAdj_3[v10] = (MakeTable(bishopAdj))
+    local _pieceSquareAdj_4 = pieceSquareAdj
+    v10 = 1 + pieceRook
+    _pieceSquareAdj_4[v10] = (MakeTable(rookAdj))
+    local _pieceSquareAdj_5 = pieceSquareAdj
+    v10 = 1 + pieceQueen
+    _pieceSquareAdj_5[v10] = (MakeTable(emptyAdj))
+    local _pieceSquareAdj_6 = pieceSquareAdj
+    v10 = 1 + pieceKing
+    _pieceSquareAdj_6[v10] = (MakeTable(kingAdj))
+    local v11 = {{}, {}, g_knightDeltas, g_bishopDeltas, g_rookDeltas, g_queenDeltas, g_queenDeltas}
+
+    for i7 = 0, 255 do
+        g_vectorDelta[i7 + 1] = {}
+        v2 = g_vectorDelta[i7 + 1]
+        v2.delta = 0
+        v2 = g_vectorDelta[i7 + 1]
+        v2.pieceMask = {}
+        g_vectorDelta[i7 + 1].pieceMask[1] = 0
+        g_vectorDelta[i7 + 1].pieceMask[2] = 0
+    end
+
+    local v12 = 0
+
+    while v12 < 128 do
+        v1 = 0
+
+        while v1 < 8 do
+            v5 = bit32.bor(v12, v1)
+            v6 = v5 - (v5 - 17) + 128
+            pieceMask = g_vectorDelta[v6 + 1].pieceMask
+            v10 = bit32.rshift(colorWhite, 3) + 1
+            pieceMask[v10] = (bit32.bor(g_vectorDelta[v6 + 1].pieceMask[bit32.rshift(colorWhite, 3) + 1], (bit32.lshift(1, piecePawn))))
+            v6 = v5 - (v5 - 15) + 128
+            pieceMask_3 = g_vectorDelta[v6 + 1].pieceMask
+            v10 = bit32.rshift(colorWhite, 3) + 1
+            pieceMask_3[v10] = (bit32.bor(g_vectorDelta[v6 + 1].pieceMask[bit32.rshift(colorWhite, 3) + 1], (bit32.lshift(1, piecePawn))))
+            v6 = v5 - (v5 + 17) + 128
+            pieceMask_5 = g_vectorDelta[v6 + 1].pieceMask
+            pieceMask_5[1] = (bit32.bor(g_vectorDelta[v6 + 1].pieceMask[1], (bit32.lshift(1, piecePawn))))
+            v6 = v5 - (v5 + 15) + 128
+            pieceMask_6 = g_vectorDelta[v6 + 1].pieceMask
+            pieceMask_6[1] = (bit32.bor(g_vectorDelta[v6 + 1].pieceMask[1], (bit32.lshift(1, piecePawn))))
+            _pieceKnight = pieceKnight
+            _pieceKing = pieceKing
+
+            for i8 = _pieceKnight, _pieceKing do
+                v7 = 0
+
+                while v7 < #v11[i8 + 1] do
+                    v8 = v5 + v11[i8 + 1][v7 + 1]
+
+                    while bit32.band(v8, 136) == 0 do
+                        v6 = v5 - v8 + 128
+                        pieceMask_7 = g_vectorDelta[v6 + 1].pieceMask
+                        v3 = bit32.rshift(colorWhite, 3) + 1
+                        pieceMask_7[v3] = (bit32.bor(g_vectorDelta[v6 + 1].pieceMask[bit32.rshift(colorWhite, 3) + 1], (bit32.lshift(1, i8))))
+                        pieceMask_9 = g_vectorDelta[v6 + 1].pieceMask
+                        pieceMask_9[1] = (bit32.bor(g_vectorDelta[v6 + 1].pieceMask[1], (bit32.lshift(1, i8))))
+                        v9 = -1
+
+                        if v5 < v8 then
+                            v9 = 1
+                        end
+
+                        v2 = bit32.band(v5, 240)
+
+                        if v2 ~= bit32.band(v8, 240) then
+                            v2 = bit32.band(v5, 15)
+
+                            if v2 == bit32.band(v8, 15) then
+                                v2 = g_vectorDelta[v6 + 1]
+                                v2.delta = v9 * 16
+                            elseif v5 % 15 == v8 % 15 then
+                                v2 = g_vectorDelta[v6 + 1]
+                                v2.delta = v9 * 15
+                            elseif v5 % 17 == v8 % 17 then
+                                v2 = g_vectorDelta[v6 + 1]
+                                v2.delta = v9 * 17
+                            end
+                        else
+                            v2 = g_vectorDelta[v6 + 1]
+                            v2.delta = v9 * 1
+                        end
+
+                        if i8 == pieceKnight then
+                            v2 = g_vectorDelta[v6 + 1]
+                            v2.delta = v11[i8 + 1][v7 + 1]
+                            break
+                        end
+
+                        if i8 == pieceKing then
+                            break
+                        end
+
+                        v8 = v8 + v11[i8 + 1][v7 + 1]
+                    end
+
+                    v7 = v7 + 1
+                end
+            end
+
+            v1 = v1 + 1
+        end
+
+        v12 = v12 + 16
+    end
+end
+
+function Search(a1) -- Line: 1471
+    local v1
+    local _minEval = minEval
+    local _maxEval = maxEval
+    local bestMove = 0
+    local v2 = 0
+    local v3 = 1
+    g_globalPly = g_globalPly + 1
+    g_nodeCount = 0
+    g_qNodeCount = 0
+    g_searchValid = true
+    g_foundmove = 0
+    g_finCnt = 0
+    g_startTime = os.clock()
+
+    while v3 <= a1 do
+        if not g_searchValid then
+            break
+        end
+
+        v1 = AlphaBeta(v3, 0, _minEval, _maxEval)
+
+        if not g_searchValid then
+            break
+        end
+
+        v2 = v1
+
+        if not (_minEval < v2) then
+            if _minEval ~= minEval then
+                _minEval = minEval
+                _maxEval = maxEval
+                v3 = v3 - 1
+            end
+        elseif v2 < _maxEval then
+            _minEval = v2 - 500
+            _maxEval = v2 + 500
+
+            if _minEval < minEval then
+                _minEval = minEval
+            end
+
+            if maxEval < _maxEval then
+                _maxEval = maxEval
+            end
+        elseif _minEval ~= minEval then
+            _minEval = minEval
+            _maxEval = maxEval
+            v3 = v3 - 1
+        end
+
+        if g_hashTable[bit32.band(g_hashKeyLow, g_hashMask) + 1] ~= nil then
+            bestMove = g_hashTable[bit32.band(g_hashKeyLow, g_hashMask) + 1].bestMove
+        end
+
+        v3 = v3 + 1
+        task.wait()
+    end
+
+    g_completedDepth = v3 - 1
+    finishMoveCallback(bestMove, v2, v3 - 1)
+end
+
+function PawnEval(a1) -- Line: 1532
+    local v1 = bit32.lshift(bit32.bor(a1, 1), 4)
+    local v2 = g_pieceList[v1 + 1]
+    v1 = v1 + 1
+
+    while v2 ~= 0 do
+        v2 = g_pieceList[v1 + 1]
+        v1 = v1 + 1
+    end
+end
+
+function Mobility(a1) -- Line: 1545
+    local v1 = iif(a1 == 8, 16, 8)
+    local _iif_2 = iif
+    local v2 = g_mobUnit[1]
+    local v3 = _iif_2(a1 == 8, v2, g_mobUnit[2])
+    local v4 = -3
+    local v5 = bit32.lshift(bit32.bor(a1, 2), 4)
+    local v6 = g_pieceList[v5 + 1]
+    v5 = v5 + 1
+
+    while v6 ~= 0 do
+        v4 = v4 + v3[1 + g_board[v6 + 31 + 1]]
+        v4 = v4 + v3[1 + g_board[v6 + 33 + 1]]
+        v4 = v4 + v3[1 + g_board[v6 + 14 + 1]]
+        v4 = v4 + v3[1 + g_board[v6 - 14 + 1]]
+        v4 = v4 + v3[1 + g_board[v6 - 31 + 1]]
+        v4 = v4 + v3[1 + g_board[v6 - 33 + 1]]
+        v4 = v4 + v3[1 + g_board[v6 + 18 + 1]]
+        v4 = v4 + v3[1 + g_board[v6 - 18 + 1]]
+        v6 = g_pieceList[v5 + 1]
+        v5 = v5 + 1
+    end
+
+    local v7 = 0 + v4 * 65
+    v4 = -4
+    v5 = bit32.lshift(bit32.bor(a1, 3), 4)
+    v6 = g_pieceList[v5 + 1]
+    v5 = v5 + 1
+
+    while v6 ~= 0 do
+        v4 = AdjMob(v6, -15, v4, v1)
+        v4 = AdjMob(v6, -17, v4, v1)
+        v4 = AdjMob(v6, 15, v4, v1)
+        v4 = AdjMob(v6, 17, v4, v1)
+        v6 = g_pieceList[v5 + 1]
+        v5 = v5 + 1
+    end
+
+    v7 = v7 + v4 * 50
+    v4 = -4
+    v5 = bit32.lshift(bit32.bor(a1, 4), 4)
+    v6 = g_pieceList[v5 + 1]
+    v5 = v5 + 1
+
+    while v6 ~= 0 do
+        v4 = AdjMob(v6, -1, v4, v1)
+        v4 = AdjMob(v6, 1, v4, v1)
+        v4 = AdjMob(v6, -16, v4, v1)
+        v4 = AdjMob(v6, 16, v4, v1)
+        v6 = g_pieceList[v5 + 1]
+        v5 = v5 + 1
+    end
+
+    v7 = v7 + v4 * 25
+    v4 = -2
+    v5 = bit32.lshift(bit32.bor(a1, 5), 4)
+    v6 = g_pieceList[v5 + 1]
+    v5 = v5 + 1
+
+    while v6 ~= 0 do
+        v4 = AdjMob(v6, -15, v4, v1)
+        v4 = AdjMob(v6, -17, v4, v1)
+        v4 = AdjMob(v6, 15, v4, v1)
+        v4 = AdjMob(v6, 17, v4, v1)
+        v4 = AdjMob(v6, -1, v4, v1)
+        v4 = AdjMob(v6, 1, v4, v1)
+        v4 = AdjMob(v6, -16, v4, v1)
+        v4 = AdjMob(v6, 16, v4, v1)
+        v6 = g_pieceList[v5 + 1]
+        v5 = v5 + 1
+    end
+
+    return v7 + v4 * 22
+end
+
+function AdjMob(a1, a2, a3, a4) -- Line: 1627
+    local v1 = a1 + a2
+    local v2 = a3
+
+    while g_board[1 + v1] == 0 do
+        v1 = v1 + a2
+        v2 = v2 + 1
+    end
+
+    if 0 < (bit32.band(g_board[1 + v1], a4)) then
+        v2 = v2 + 1
+    end
+
+    return v2
+end
+
+function Evaluate() -- Line: 1642
+    local _g_baseEval = g_baseEval
+    local v1 = (Mobility(8)) - Mobility(0)
+    local v2 = 0
+
+    if g_pieceList[bit32.lshift(pieceQueen, 4) + 1] == 0 then
+        v2 = v2
+            - pieceSquareAdj[1 + pieceKing][1 + g_pieceList[bit32.lshift(bit32.bor(colorWhite, pieceKing), 4) + 1]]
+    end
+
+    if g_pieceList[bit32.lshift(bit32.bor(colorWhite, pieceQueen), 4) + 1] == 0 then
+        v2 = v2
+            + pieceSquareAdj[1 + pieceKing][1 + flipTable[1 + g_pieceList[bit32.lshift(pieceKing, 4) + 1]]]
+    end
+
+    if 2 <= g_pieceCount[1 + pieceBishop] then
+        v2 = v2 - 500
+    end
+
+    if 2 <= g_pieceCount[bit32.bor(pieceBishop, colorWhite) + 1] then
+        v2 = v2 + 500
+    end
+
+    if g_toMove == 0 then
+        return _g_baseEval - v1 - v2
+    end
+
+    return _g_baseEval + v1 + v2
+end
+
+function ScoreMove(a1) -- Line: 1681
+    local v1 = bit32.band(bit32.rshift(a1, 8), 255)
+    local v2 = bit32.band(g_board[v1 + 1], 7)
+    local v3 = g_board[bit32.band(a1, 255) + 1]
+    local v4 = bit32.band(v3, 7)
+
+    if v2 ~= 0 then
+        return bit32.lshift(v2, 5) - v4
+    end
+
+    return historyTable[bit32.band(v3, 15) + 1][v1 + 1]
+end
+
+function QSearch(a1, a2, a3) -- Line: 1697
+    local v1, v2, v3, v4, v5, v6, v7, v8
+    g_qNodeCount = g_qNodeCount + 1
+    if GarboPollSearch() then
+        return a1
+    end
+    local v9 = iif(g_inCheck, minEval + 1, Evaluate())
+
+    if a2 <= v9 then
+        return v9
+    end
+
+    if a1 < v9 then
+        a1 = v9
+    end
+
+    local v10 = {}
+    local v11 = {}
+    local _g_inCheck_2 = g_inCheck
+
+    if not _g_inCheck_2 then
+        local v12, v13
+        GenerateCaptureMoves(v10)
+
+        v4 = #v10 - 1
+
+        for i = 0, v4 do
+            v12 = bit32.band(g_board[bit32.band(bit32.rshift(v10[i + 1], 8), 255) + 1], 7)
+            v13 = bit32.band(g_board[bit32.band(v10[i + 1], 255) + 1], 7)
+            v11[i + 1] = bit32.lshift(v12, 5) - v13
+        end
+    else
+        GenerateCaptureMoves(v10)
+        GenerateAllMoves(v10)
+
+        v4 = #v10 - 1
+
+        for j = 0, v4 do
+            v11[j + 1] = (ScoreMove(v10[j + 1]))
+        end
+    end
+
+    v4 = #v10 - 1
+    local v14, v15 = a2, a3
+
+    for k = 0, v4 do
+        v8 = k
+        v6 = #v10 - 1
+        v5 = k + 1
+
+        for n = v6, v5, -1 do
+            v7 = v11[n + 1]
+
+            if v11[v8 + 1] < v7 then
+                v8 = n
+            end
+        end
+
+        v1 = v10[k + 1]
+        v10[k + 1] = v10[v8 + 1]
+        v10[v8 + 1] = v1
+        v2 = v11[k + 1]
+        v11[k + 1] = v11[v8 + 1]
+        v11[v8 + 1] = v2
+
+        if not _g_inCheck_2 and not See(v10[k + 1]) then
+            continue
+        end
+
+        if MakeMove(v10[k + 1]) then
+            v3 = -QSearch(-v14, -a1, v15 - 1)
+            UnmakeMove(v10[k + 1])
+
+            if v9 < v3 then
+                if v14 <= v3 then
+                    return v3
+                end
+
+                if a1 < v3 then
+                    a1 = v3
+                end
+
+                v9 = v3
+            end
+        end
+    end
+
+    if v15 == 0 and not _g_inCheck_2 then
+        local _g_inCheck_3, v16
+        v10 = {}
+
+        GenerateAllMoves(v10)
+
+        v4 = #v10 - 1
+
+        for m = 0, v4 do
+            v11[m + 1] = (ScoreMove(v10[m + 1]))
+        end
+
+        v4 = #v10 - 1
+
+        for i5 = 0, v4 do
+            v8 = i5
+            v6 = #v10 - 1
+            v5 = i5 + 1
+
+            for i6 = v6, v5, -1 do
+                v7 = v11[i6 + 1]
+
+                if v11[v8 + 1] < v7 then
+                    v8 = i6
+                end
+            end
+
+            v1 = v10[i5 + 1]
+            v10[i5 + 1] = v10[v8 + 1]
+            v10[v8 + 1] = v1
+            v2 = v11[i5 + 1]
+            v11[i5 + 1] = v11[v8 + 1]
+            v11[v8 + 1] = v2
+            v16 = false
+
+            if MakeMove(v10[i5 + 1]) then
+                _g_inCheck_3 = g_inCheck
+                UnmakeMove(v10[i5 + 1])
+
+                if not _g_inCheck_3 or not See(v10[i5 + 1]) then
+                    v16 = true
+                end
+            else
+                v16 = true
+            end
+
+            if not v16 then
+                MakeMove(v10[i5 + 1])
+
+                v3 = -QSearch(-v14, -a1, v15 - 1)
+                UnmakeMove(v10[i5 + 1])
+
+                if v9 < v3 then
+                    if v14 <= v3 then
+                        return v3
+                    end
+
+                    if a1 < v3 then
+                        a1 = v3
+                    end
+
+                    v9 = v3
+                end
+            end
+        end
+    end
+
+    return v9
+end
+
+function UndoHistory(a1, a2, a3, a4, a5, a6, a7, a8) -- Line: 1857
+    return {
+        ep = a1,
+        castleRights = a2,
+        inCheck = a3,
+        baseEval = a4,
+        hashKeyLow = a5,
+        hashKeyHigh = a6,
+        move50 = a7,
+        captured = a8,
+    }
+end
+
+function MakeMove(a1) -- Line: 1872
+    local _g_baseEval_5, _g_baseEval_6, _g_baseEval_7, _g_baseEval_8, _g_inCheck, _g_pieceCount_2, _g_pieceCount_4,
+        _g_pieceList_10, _g_pieceList_4, _g_pieceList_5, _g_pieceList_6, _g_pieceList_8, _g_pieceList_9,
+        _g_repMoveStack, _iif_10, _iif_6, _iif_8, _iif_9, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11
+    local v12 = bit32.rshift(g_toMove, 3)
+    local v13 = 8 - g_toMove
+    local v14 = bit32.band(a1, 16711680)
+    local v15 = bit32.band(bit32.rshift(a1, 8), 255)
+    local v16 = bit32.band(a1, 255)
+    local v17 = v15 - v16
+    local v18 = g_board[v15 + 1]
+    local v19 = g_board[v16 + 1]
+    local v20 = v15
+    g_finCnt = g_finCnt + 1
+
+    if 0 < (bit32.band(v14, moveflagEPC)) then
+        v20 = iif(v12 > 0, v15 + 16, v15 - 16)
+        v18 = g_board[v20 + 1]
+        g_board[v20 + 1] = pieceEmpty
+    end
+
+    local _g_moveUndoStack = g_moveUndoStack
+    local v21 = 1 + g_moveCount
+    _g_moveUndoStack[v21] = (UndoHistory(g_enPassentSquare, g_castleRights, g_inCheck, g_baseEval, g_hashKeyLow, g_hashKeyHigh, g_move50, v18))
+    g_moveCount = g_moveCount + 1
+    g_enPassentSquare = -1
+
+    if v14 > 0 then
+        local v22, v23
+        v9 = bit32.band(v14, moveflagCastleKing)
+
+        if v9 > 0 then
+            if not IsSquareAttackable(v16 + 1, v13) and not IsSquareAttackable(v16 + 2, v13) then
+                v22 = g_board[v15 + 1 + 1]
+                g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v15 + 1 + 1][(bit32.band(v22, 15)) + 1])
+                g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v15 + 1 + 1][(bit32.band(v22, 15)) + 1])
+                g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v15 - 1 + 1][(bit32.band(v22, 15)) + 1])
+                g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v15 - 1 + 1][(bit32.band(v22, 15)) + 1])
+                g_board[v15 - 1 + 1] = v22
+                local _g_board = g_board
+                v21 = v15 + 1 + 1
+                _g_board[v21] = pieceEmpty
+                local _g_baseEval = g_baseEval
+                v10 = pieceSquareAdj[bit32.band(v22, 7) + 1]
+                local _iif_2 = iif
+                g_baseEval = _g_baseEval
+                    - v10[1 + _iif_2(v12 == 0, flipTable[v15 + 1 + 1], v15 + 1)]
+                local _g_baseEval_2 = g_baseEval
+                v10 = pieceSquareAdj[bit32.band(v22, 7) + 1]
+                local _iif_3 = iif
+                g_baseEval = _g_baseEval_2
+                    + v10[1 + _iif_3(v12 == 0, flipTable[v15 - 1 + 1], v15 - 1)]
+                v23 = g_pieceIndex[v15 + 1 + 1]
+                g_pieceIndex[v15 - 1 + 1] = v23
+                local _g_pieceList = g_pieceList
+                v21 = bit32.bor(bit32.lshift(bit32.band(v22, 15), 4), v23) + 1
+                _g_pieceList[v21] = v15 - 1
+
+                if v18 > 0 then
+                    v6 = bit32.band(v18, 15)
+                    g_pieceCount[v6 + 1] = g_pieceCount[v6 + 1] - 1
+                    v7 = g_pieceList[bit32.bor(bit32.lshift(v6, 4), g_pieceCount[v6 + 1]) + 1]
+                    g_pieceIndex[v7 + 1] = g_pieceIndex[v20 + 1]
+                    _g_pieceList_4 = g_pieceList
+                    v10 = bit32.lshift(v6, 4)
+                    v11 = g_pieceIndex[v7 + 1]
+                    _g_pieceList_4[bit32.bor(v10, v11) + 1] = v7
+                    _g_pieceList_5 = g_pieceList
+                    v10 = bit32.lshift(v6, 4)
+                    _g_pieceCount_2 = g_pieceCount
+                    _g_pieceList_5[bit32.bor(v10, _g_pieceCount_2[v6 + 1]) + 1] = 0
+                    g_baseEval = g_baseEval + materialTable[bit32.band(v18, 7) + 1]
+                    _g_baseEval_5 = g_baseEval
+                    v10 = pieceSquareAdj[bit32.band(v18, 7) + 1]
+                    _iif_6 = iif
+                    g_baseEval = _g_baseEval_5
+                        + v10[1 + _iif_6(v12 > 0, flipTable[v20 + 1], v20)]
+                    g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v20 + 1][v6 + 1])
+                    g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v20 + 1][v6 + 1])
+                    g_move50 = 0
+                elseif (bit32.band(v19, 7)) == piecePawn then
+                    if v17 < 0 then
+                        v17 = -v17
+                    end
+
+                    if v17 > 16 then
+                        g_enPassentSquare = iif(v12 > 0, v15 + 16, v15 - 16)
+                    end
+
+                    g_move50 = 0
+                end
+
+                g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v16 + 1][(bit32.band(v19, 15)) + 1])
+                g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v16 + 1][(bit32.band(v19, 15)) + 1])
+                g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v15 + 1][(bit32.band(v19, 15)) + 1])
+                g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v15 + 1][(bit32.band(v19, 15)) + 1])
+                g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristBlackLow)
+                g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristBlackHigh)
+                g_castleRights = bit32.band(g_castleRights, (bit32.band(g_castleRightsMask[v16 + 1], g_castleRightsMask[v15 + 1])))
+                _g_baseEval_6 = g_baseEval
+                v10 = pieceSquareAdj[bit32.band(v19, 7) + 1]
+                _iif_8 = iif
+                g_baseEval = _g_baseEval_6
+                    - v10[1 + _iif_8(v12 == 0, flipTable[v16 + 1], v16)]
+                g_pieceIndex[v15 + 1] = g_pieceIndex[v16 + 1]
+                _g_pieceList_6 = g_pieceList
+                v10 = bit32.lshift(bit32.band(v19, 15), 4)
+                v11 = g_pieceIndex[v15 + 1]
+                _g_pieceList_6[bit32.bor(v10, v11) + 1] = v15
+
+                if not (0 < (bit32.band(v14, moveflagPromotion))) then
+                    g_board[v15 + 1] = g_board[v16 + 1]
+                    _g_baseEval_8 = g_baseEval
+                    v10 = pieceSquareAdj[bit32.band(v19, 7) + 1]
+                    _iif_10 = iif
+                    g_baseEval = _g_baseEval_8
+                        + v10[1 + _iif_10(v12 == 0, flipTable[v15 + 1], v15)]
+                else
+                    v1 = bit32.band(v19, 4294967288)
+                    v1 = if 0 < (bit32.band(v14, moveflagPromoteKnight)) then
+                        bit32.bor(v1, pieceKnight)
+                    else
+                        if 0 < (bit32.band(v14, moveflagPromoteQueen)) then
+                            bit32.bor(v1, pieceQueen)
+                        else
+                            if not (0 < (bit32.band(v14, moveflagPromoteBishop))) then
+                                bit32.bor(v1, pieceRook)
+                            else
+                                bit32.bor(v1, pieceBishop)
+                    g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v15 + 1][(bit32.band(v19, 15)) + 1])
+                    g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v15 + 1][(bit32.band(v19, 15)) + 1])
+                    g_board[v15 + 1] = v1
+                    g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v15 + 1][(bit32.band(v1, 15)) + 1])
+                    g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v15 + 1][(bit32.band(v1, 15)) + 1])
+                    _g_baseEval_7 = g_baseEval
+                    v10 = pieceSquareAdj[bit32.band(v1, 7) + 1]
+                    _iif_9 = iif
+                    g_baseEval = _g_baseEval_7
+                        + v10[1 + _iif_9(v12 == 0, flipTable[v15 + 1], v15)]
+                    g_baseEval = g_baseEval - materialTable[1 + piecePawn]
+                    g_baseEval = g_baseEval + materialTable[bit32.band(v1, 7) + 1]
+                    v2 = bit32.band(v19, 15)
+                    v3 = bit32.band(v1, 15)
+                    g_pieceCount[v2 + 1] = g_pieceCount[v2 + 1] - 1
+                    v8 = g_pieceList[bit32.bor(bit32.lshift(v2, 4), g_pieceCount[v2 + 1]) + 1]
+                    g_pieceIndex[v8 + 1] = g_pieceIndex[v15 + 1]
+                    _g_pieceList_8 = g_pieceList
+                    v10 = bit32.lshift(v2, 4)
+                    v11 = g_pieceIndex[v8 + 1]
+                    _g_pieceList_8[bit32.bor(v10, v11) + 1] = v8
+                    _g_pieceList_9 = g_pieceList
+                    v10 = bit32.lshift(v2, 4)
+                    _g_pieceCount_4 = g_pieceCount
+                    _g_pieceList_9[bit32.bor(v10, _g_pieceCount_4[v2 + 1]) + 1] = 0
+                    g_pieceIndex[v15 + 1] = g_pieceCount[v3 + 1]
+                    _g_pieceList_10 = g_pieceList
+                    v10 = bit32.lshift(v3, 4)
+                    v11 = g_pieceIndex[v15 + 1]
+                    _g_pieceList_10[bit32.bor(v10, v11) + 1] = v15
+                    g_pieceCount[v3 + 1] = g_pieceCount[v3 + 1] + 1
+                end
+
+                g_board[v16 + 1] = pieceEmpty
+                g_toMove = v13
+                g_baseEval = -g_baseEval
+                v9 = 0 < (bit32.band(v19, 7))
+                _g_inCheck = true
+
+                if not (0 < pieceKing) then
+                    _g_inCheck = g_inCheck
+                end
+
+                if v9 == _g_inCheck then
+                    if IsSquareAttackable(g_pieceList[bit32.lshift(bit32.bor(pieceKing, 8 - g_toMove), 4) + 1], v13) then
+                        UnmakeMove(a1)
+                        return false
+                    end
+
+                    g_inCheck = false
+
+                    if not (v14 <= moveflagEPC) then
+                        g_inCheck = IsSquareAttackable(g_pieceList[bit32.lshift(bit32.bor(pieceKing, g_toMove), 4) + 1], 8 - g_toMove)
+                    else
+                        v5 = g_pieceList[bit32.lshift(bit32.bor(pieceKing, g_toMove), 4) + 1]
+                        g_inCheck = IsSquareAttackableFrom(v5, v15)
+
+                        if not g_inCheck then
+                            g_inCheck = ExposesCheck(v16, v5)
+
+                            if not g_inCheck and v20 ~= v15 then
+                                g_inCheck = ExposesCheck(v20, v5)
+                            end
+                        end
+                    end
+
+                    _g_repMoveStack = g_repMoveStack
+                    v21 = 1 + (g_moveCount - 1)
+                    _g_repMoveStack[v21] = g_hashKeyLow
+                    g_move50 = g_move50 + 1
+
+                    return true
+                end
+
+                v4 = g_pieceList[bit32.lshift(bit32.bor(pieceKing, 8 - g_toMove), 4) + 1]
+
+                if ExposesCheck(v16, v4) then
+                    UnmakeMove(a1)
+                    return false
+                end
+
+                if v20 ~= v15 and ExposesCheck(v20, v4) then
+                    UnmakeMove(a1)
+                    return false
+                end
+
+                g_inCheck = false
+
+                if not (v14 <= moveflagEPC) then
+                    g_inCheck = IsSquareAttackable(g_pieceList[bit32.lshift(bit32.bor(pieceKing, g_toMove), 4) + 1], 8 - g_toMove)
+                else
+                    v5 = g_pieceList[bit32.lshift(bit32.bor(pieceKing, g_toMove), 4) + 1]
+                    g_inCheck = IsSquareAttackableFrom(v5, v15)
+
+                    if not g_inCheck then
+                        g_inCheck = ExposesCheck(v16, v5)
+
+                        if not g_inCheck and v20 ~= v15 then
+                            g_inCheck = ExposesCheck(v20, v5)
+                        end
+                    end
+                end
+
+                _g_repMoveStack = g_repMoveStack
+                v21 = 1 + (g_moveCount - 1)
+                _g_repMoveStack[v21] = g_hashKeyLow
+                g_move50 = g_move50 + 1
+
+                return true
+            end
+
+            g_moveCount = g_moveCount - 1
+
+            return false
+        end
+
+        v9 = bit32.band(v14, moveflagCastleQueen)
+
+        if v9 > 0 then
+            if not IsSquareAttackable(v16 - 1, v13) and not IsSquareAttackable(v16 - 2, v13) then
+                v22 = g_board[v15 - 2 + 1]
+                g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v15 - 2 + 1][(bit32.band(v22, 15)) + 1])
+                g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v15 - 2 + 1][(bit32.band(v22, 15)) + 1])
+                g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v15 + 1 + 1][(bit32.band(v22, 15)) + 1])
+                g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v15 + 1 + 1][(bit32.band(v22, 15)) + 1])
+                g_board[v15 + 1 + 1] = v22
+                local _g_board_2 = g_board
+                v21 = v15 - 2 + 1
+                _g_board_2[v21] = pieceEmpty
+                local _g_baseEval_3 = g_baseEval
+                v10 = pieceSquareAdj[bit32.band(v22, 7) + 1]
+                local _iif_4 = iif
+                g_baseEval = _g_baseEval_3
+                    - v10[1 + _iif_4(v12 == 0, flipTable[v15 - 2 + 1], v15 - 2)]
+                local _g_baseEval_4 = g_baseEval
+                v10 = pieceSquareAdj[bit32.band(v22, 7) + 1]
+                local _iif_5 = iif
+                g_baseEval = _g_baseEval_4
+                    + v10[1 + _iif_5(v12 == 0, flipTable[v15 + 1 + 1], v15 + 1)]
+                v23 = g_pieceIndex[v15 - 2 + 1]
+                g_pieceIndex[v15 + 1 + 1] = v23
+                local _g_pieceList_2 = g_pieceList
+                v21 = bit32.bor(bit32.lshift(bit32.band(v22, 15), 4), v23) + 1
+                _g_pieceList_2[v21] = v15 + 1
+
+                if v18 > 0 then
+                    v6 = bit32.band(v18, 15)
+                    g_pieceCount[v6 + 1] = g_pieceCount[v6 + 1] - 1
+                    v7 = g_pieceList[bit32.bor(bit32.lshift(v6, 4), g_pieceCount[v6 + 1]) + 1]
+                    g_pieceIndex[v7 + 1] = g_pieceIndex[v20 + 1]
+                    _g_pieceList_4 = g_pieceList
+                    v10 = bit32.lshift(v6, 4)
+                    v11 = g_pieceIndex[v7 + 1]
+                    _g_pieceList_4[bit32.bor(v10, v11) + 1] = v7
+                    _g_pieceList_5 = g_pieceList
+                    v10 = bit32.lshift(v6, 4)
+                    _g_pieceCount_2 = g_pieceCount
+                    _g_pieceList_5[bit32.bor(v10, _g_pieceCount_2[v6 + 1]) + 1] = 0
+                    g_baseEval = g_baseEval + materialTable[bit32.band(v18, 7) + 1]
+                    _g_baseEval_5 = g_baseEval
+                    v10 = pieceSquareAdj[bit32.band(v18, 7) + 1]
+                    _iif_6 = iif
+                    g_baseEval = _g_baseEval_5
+                        + v10[1 + _iif_6(v12 > 0, flipTable[v20 + 1], v20)]
+                    g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v20 + 1][v6 + 1])
+                    g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v20 + 1][v6 + 1])
+                    g_move50 = 0
+                elseif (bit32.band(v19, 7)) == piecePawn then
+                    if v17 < 0 then
+                        v17 = -v17
+                    end
+
+                    if v17 > 16 then
+                        g_enPassentSquare = iif(v12 > 0, v15 + 16, v15 - 16)
+                    end
+
+                    g_move50 = 0
+                end
+
+                g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v16 + 1][(bit32.band(v19, 15)) + 1])
+                g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v16 + 1][(bit32.band(v19, 15)) + 1])
+                g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v15 + 1][(bit32.band(v19, 15)) + 1])
+                g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v15 + 1][(bit32.band(v19, 15)) + 1])
+                g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristBlackLow)
+                g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristBlackHigh)
+                g_castleRights = bit32.band(g_castleRights, (bit32.band(g_castleRightsMask[v16 + 1], g_castleRightsMask[v15 + 1])))
+                _g_baseEval_6 = g_baseEval
+                v10 = pieceSquareAdj[bit32.band(v19, 7) + 1]
+                _iif_8 = iif
+                g_baseEval = _g_baseEval_6
+                    - v10[1 + _iif_8(v12 == 0, flipTable[v16 + 1], v16)]
+                g_pieceIndex[v15 + 1] = g_pieceIndex[v16 + 1]
+                _g_pieceList_6 = g_pieceList
+                v10 = bit32.lshift(bit32.band(v19, 15), 4)
+                v11 = g_pieceIndex[v15 + 1]
+                _g_pieceList_6[bit32.bor(v10, v11) + 1] = v15
+
+                if not (0 < (bit32.band(v14, moveflagPromotion))) then
+                    g_board[v15 + 1] = g_board[v16 + 1]
+                    _g_baseEval_8 = g_baseEval
+                    v10 = pieceSquareAdj[bit32.band(v19, 7) + 1]
+                    _iif_10 = iif
+                    g_baseEval = _g_baseEval_8
+                        + v10[1 + _iif_10(v12 == 0, flipTable[v15 + 1], v15)]
+                else
+                    v1 = bit32.band(v19, 4294967288)
+                    v1 = if 0 < (bit32.band(v14, moveflagPromoteKnight)) then
+                        bit32.bor(v1, pieceKnight)
+                    else
+                        if 0 < (bit32.band(v14, moveflagPromoteQueen)) then
+                            bit32.bor(v1, pieceQueen)
+                        else
+                            if not (0 < (bit32.band(v14, moveflagPromoteBishop))) then
+                                bit32.bor(v1, pieceRook)
+                            else
+                                bit32.bor(v1, pieceBishop)
+                    g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v15 + 1][(bit32.band(v19, 15)) + 1])
+                    g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v15 + 1][(bit32.band(v19, 15)) + 1])
+                    g_board[v15 + 1] = v1
+                    g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v15 + 1][(bit32.band(v1, 15)) + 1])
+                    g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v15 + 1][(bit32.band(v1, 15)) + 1])
+                    _g_baseEval_7 = g_baseEval
+                    v10 = pieceSquareAdj[bit32.band(v1, 7) + 1]
+                    _iif_9 = iif
+                    g_baseEval = _g_baseEval_7
+                        + v10[1 + _iif_9(v12 == 0, flipTable[v15 + 1], v15)]
+                    g_baseEval = g_baseEval - materialTable[1 + piecePawn]
+                    g_baseEval = g_baseEval + materialTable[bit32.band(v1, 7) + 1]
+                    v2 = bit32.band(v19, 15)
+                    v3 = bit32.band(v1, 15)
+                    g_pieceCount[v2 + 1] = g_pieceCount[v2 + 1] - 1
+                    v8 = g_pieceList[bit32.bor(bit32.lshift(v2, 4), g_pieceCount[v2 + 1]) + 1]
+                    g_pieceIndex[v8 + 1] = g_pieceIndex[v15 + 1]
+                    _g_pieceList_8 = g_pieceList
+                    v10 = bit32.lshift(v2, 4)
+                    v11 = g_pieceIndex[v8 + 1]
+                    _g_pieceList_8[bit32.bor(v10, v11) + 1] = v8
+                    _g_pieceList_9 = g_pieceList
+                    v10 = bit32.lshift(v2, 4)
+                    _g_pieceCount_4 = g_pieceCount
+                    _g_pieceList_9[bit32.bor(v10, _g_pieceCount_4[v2 + 1]) + 1] = 0
+                    g_pieceIndex[v15 + 1] = g_pieceCount[v3 + 1]
+                    _g_pieceList_10 = g_pieceList
+                    v10 = bit32.lshift(v3, 4)
+                    v11 = g_pieceIndex[v15 + 1]
+                    _g_pieceList_10[bit32.bor(v10, v11) + 1] = v15
+                    g_pieceCount[v3 + 1] = g_pieceCount[v3 + 1] + 1
+                end
+
+                g_board[v16 + 1] = pieceEmpty
+                g_toMove = v13
+                g_baseEval = -g_baseEval
+                v9 = 0 < (bit32.band(v19, 7))
+                _g_inCheck = true
+
+                if not (0 < pieceKing) then
+                    _g_inCheck = g_inCheck
+                end
+
+                if v9 == _g_inCheck then
+                    if IsSquareAttackable(g_pieceList[bit32.lshift(bit32.bor(pieceKing, 8 - g_toMove), 4) + 1], v13) then
+                        UnmakeMove(a1)
+                        return false
+                    end
+
+                    g_inCheck = false
+
+                    if not (v14 <= moveflagEPC) then
+                        g_inCheck = IsSquareAttackable(g_pieceList[bit32.lshift(bit32.bor(pieceKing, g_toMove), 4) + 1], 8 - g_toMove)
+                    else
+                        v5 = g_pieceList[bit32.lshift(bit32.bor(pieceKing, g_toMove), 4) + 1]
+                        g_inCheck = IsSquareAttackableFrom(v5, v15)
+
+                        if not g_inCheck then
+                            g_inCheck = ExposesCheck(v16, v5)
+
+                            if not g_inCheck and v20 ~= v15 then
+                                g_inCheck = ExposesCheck(v20, v5)
+                            end
+                        end
+                    end
+
+                    _g_repMoveStack = g_repMoveStack
+                    v21 = 1 + (g_moveCount - 1)
+                    _g_repMoveStack[v21] = g_hashKeyLow
+                    g_move50 = g_move50 + 1
+
+                    return true
+                end
+
+                v4 = g_pieceList[bit32.lshift(bit32.bor(pieceKing, 8 - g_toMove), 4) + 1]
+
+                if ExposesCheck(v16, v4) then
+                    UnmakeMove(a1)
+                    return false
+                end
+
+                if v20 ~= v15 and ExposesCheck(v20, v4) then
+                    UnmakeMove(a1)
+                    return false
+                end
+
+                g_inCheck = false
+
+                if not (v14 <= moveflagEPC) then
+                    g_inCheck = IsSquareAttackable(g_pieceList[bit32.lshift(bit32.bor(pieceKing, g_toMove), 4) + 1], 8 - g_toMove)
+                else
+                    v5 = g_pieceList[bit32.lshift(bit32.bor(pieceKing, g_toMove), 4) + 1]
+                    g_inCheck = IsSquareAttackableFrom(v5, v15)
+
+                    if not g_inCheck then
+                        g_inCheck = ExposesCheck(v16, v5)
+
+                        if not g_inCheck and v20 ~= v15 then
+                            g_inCheck = ExposesCheck(v20, v5)
+                        end
+                    end
+                end
+
+                _g_repMoveStack = g_repMoveStack
+                v21 = 1 + (g_moveCount - 1)
+                _g_repMoveStack[v21] = g_hashKeyLow
+                g_move50 = g_move50 + 1
+
+                return true
+            end
+
+            g_moveCount = g_moveCount - 1
+
+            return false
+        end
+    end
+
+    if v18 > 0 then
+        v6 = bit32.band(v18, 15)
+        g_pieceCount[v6 + 1] = g_pieceCount[v6 + 1] - 1
+        v7 = g_pieceList[bit32.bor(bit32.lshift(v6, 4), g_pieceCount[v6 + 1]) + 1]
+        g_pieceIndex[v7 + 1] = g_pieceIndex[v20 + 1]
+        _g_pieceList_4 = g_pieceList
+        v10 = bit32.lshift(v6, 4)
+        v11 = g_pieceIndex[v7 + 1]
+        _g_pieceList_4[bit32.bor(v10, v11) + 1] = v7
+        _g_pieceList_5 = g_pieceList
+        v10 = bit32.lshift(v6, 4)
+        _g_pieceCount_2 = g_pieceCount
+        _g_pieceList_5[bit32.bor(v10, _g_pieceCount_2[v6 + 1]) + 1] = 0
+        g_baseEval = g_baseEval + materialTable[bit32.band(v18, 7) + 1]
+        _g_baseEval_5 = g_baseEval
+        v10 = pieceSquareAdj[bit32.band(v18, 7) + 1]
+        _iif_6 = iif
+        g_baseEval = _g_baseEval_5 + v10[1 + _iif_6(v12 > 0, flipTable[v20 + 1], v20)]
+        g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v20 + 1][v6 + 1])
+        g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v20 + 1][v6 + 1])
+        g_move50 = 0
+    elseif (bit32.band(v19, 7)) == piecePawn then
+        if v17 < 0 then
+            v17 = -v17
+        end
+
+        if v17 > 16 then
+            g_enPassentSquare = iif(v12 > 0, v15 + 16, v15 - 16)
+        end
+
+        g_move50 = 0
+    end
+
+    g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v16 + 1][(bit32.band(v19, 15)) + 1])
+    g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v16 + 1][(bit32.band(v19, 15)) + 1])
+    g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v15 + 1][(bit32.band(v19, 15)) + 1])
+    g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v15 + 1][(bit32.band(v19, 15)) + 1])
+    g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristBlackLow)
+    g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristBlackHigh)
+    g_castleRights = bit32.band(g_castleRights, (bit32.band(g_castleRightsMask[v16 + 1], g_castleRightsMask[v15 + 1])))
+    _g_baseEval_6 = g_baseEval
+    v10 = pieceSquareAdj[bit32.band(v19, 7) + 1]
+    _iif_8 = iif
+    g_baseEval = _g_baseEval_6 - v10[1 + _iif_8(v12 == 0, flipTable[v16 + 1], v16)]
+    g_pieceIndex[v15 + 1] = g_pieceIndex[v16 + 1]
+    _g_pieceList_6 = g_pieceList
+    v10 = bit32.lshift(bit32.band(v19, 15), 4)
+    v11 = g_pieceIndex[v15 + 1]
+    _g_pieceList_6[bit32.bor(v10, v11) + 1] = v15
+
+    if not (0 < (bit32.band(v14, moveflagPromotion))) then
+        g_board[v15 + 1] = g_board[v16 + 1]
+        _g_baseEval_8 = g_baseEval
+        v10 = pieceSquareAdj[bit32.band(v19, 7) + 1]
+        _iif_10 = iif
+        g_baseEval = _g_baseEval_8 + v10[1 + _iif_10(v12 == 0, flipTable[v15 + 1], v15)]
+    else
+        v1 = bit32.band(v19, 4294967288)
+        v1 = if 0 < (bit32.band(v14, moveflagPromoteKnight)) then
+            bit32.bor(v1, pieceKnight)
+        else
+            if 0 < (bit32.band(v14, moveflagPromoteQueen)) then
+                bit32.bor(v1, pieceQueen)
+            else
+                if not (0 < (bit32.band(v14, moveflagPromoteBishop))) then
+                    bit32.bor(v1, pieceRook)
+                else
+                    bit32.bor(v1, pieceBishop)
+        g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v15 + 1][(bit32.band(v19, 15)) + 1])
+        g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v15 + 1][(bit32.band(v19, 15)) + 1])
+        g_board[v15 + 1] = v1
+        g_hashKeyLow = bit32.bxor(g_hashKeyLow, g_zobristLow[v15 + 1][(bit32.band(v1, 15)) + 1])
+        g_hashKeyHigh = bit32.bxor(g_hashKeyHigh, g_zobristHigh[v15 + 1][(bit32.band(v1, 15)) + 1])
+        _g_baseEval_7 = g_baseEval
+        v10 = pieceSquareAdj[bit32.band(v1, 7) + 1]
+        _iif_9 = iif
+        g_baseEval = _g_baseEval_7 + v10[1 + _iif_9(v12 == 0, flipTable[v15 + 1], v15)]
+        g_baseEval = g_baseEval - materialTable[1 + piecePawn]
+        g_baseEval = g_baseEval + materialTable[bit32.band(v1, 7) + 1]
+        v2 = bit32.band(v19, 15)
+        v3 = bit32.band(v1, 15)
+        g_pieceCount[v2 + 1] = g_pieceCount[v2 + 1] - 1
+        v8 = g_pieceList[bit32.bor(bit32.lshift(v2, 4), g_pieceCount[v2 + 1]) + 1]
+        g_pieceIndex[v8 + 1] = g_pieceIndex[v15 + 1]
+        _g_pieceList_8 = g_pieceList
+        v10 = bit32.lshift(v2, 4)
+        v11 = g_pieceIndex[v8 + 1]
+        _g_pieceList_8[bit32.bor(v10, v11) + 1] = v8
+        _g_pieceList_9 = g_pieceList
+        v10 = bit32.lshift(v2, 4)
+        _g_pieceCount_4 = g_pieceCount
+        _g_pieceList_9[bit32.bor(v10, _g_pieceCount_4[v2 + 1]) + 1] = 0
+        g_pieceIndex[v15 + 1] = g_pieceCount[v3 + 1]
+        _g_pieceList_10 = g_pieceList
+        v10 = bit32.lshift(v3, 4)
+        v11 = g_pieceIndex[v15 + 1]
+        _g_pieceList_10[bit32.bor(v10, v11) + 1] = v15
+        g_pieceCount[v3 + 1] = g_pieceCount[v3 + 1] + 1
+    end
+
+    g_board[v16 + 1] = pieceEmpty
+    g_toMove = v13
+    g_baseEval = -g_baseEval
+    v9 = 0 < (bit32.band(v19, 7))
+    _g_inCheck = true
+
+    if not (0 < pieceKing) then
+        _g_inCheck = g_inCheck
+    end
+
+    if v9 == _g_inCheck then
+        if IsSquareAttackable(g_pieceList[bit32.lshift(bit32.bor(pieceKing, 8 - g_toMove), 4) + 1], v13) then
+            UnmakeMove(a1)
+            return false
+        end
+
+        g_inCheck = false
+
+        if not (v14 <= moveflagEPC) then
+            g_inCheck = IsSquareAttackable(g_pieceList[bit32.lshift(bit32.bor(pieceKing, g_toMove), 4) + 1], 8 - g_toMove)
+        else
+            v5 = g_pieceList[bit32.lshift(bit32.bor(pieceKing, g_toMove), 4) + 1]
+            g_inCheck = IsSquareAttackableFrom(v5, v15)
+
+            if not g_inCheck then
+                g_inCheck = ExposesCheck(v16, v5)
+
+                if not g_inCheck and v20 ~= v15 then
+                    g_inCheck = ExposesCheck(v20, v5)
+                end
+            end
+        end
+
+        _g_repMoveStack = g_repMoveStack
+        v21 = 1 + (g_moveCount - 1)
+        _g_repMoveStack[v21] = g_hashKeyLow
+        g_move50 = g_move50 + 1
+
+        return true
+    end
+
+    v4 = g_pieceList[bit32.lshift(bit32.bor(pieceKing, 8 - g_toMove), 4) + 1]
+
+    if ExposesCheck(v16, v4) then
+        UnmakeMove(a1)
+        return false
+    end
+
+    if v20 ~= v15 and ExposesCheck(v20, v4) then
+        UnmakeMove(a1)
+        return false
+    end
+
+    g_inCheck = false
+
+    if not (v14 <= moveflagEPC) then
+        g_inCheck = IsSquareAttackable(g_pieceList[bit32.lshift(bit32.bor(pieceKing, g_toMove), 4) + 1], 8 - g_toMove)
+    else
+        v5 = g_pieceList[bit32.lshift(bit32.bor(pieceKing, g_toMove), 4) + 1]
+        g_inCheck = IsSquareAttackableFrom(v5, v15)
+
+        if not g_inCheck then
+            g_inCheck = ExposesCheck(v16, v5)
+
+            if not g_inCheck and v20 ~= v15 then
+                g_inCheck = ExposesCheck(v20, v5)
+            end
+        end
+    end
+
+    _g_repMoveStack = g_repMoveStack
+    v21 = 1 + (g_moveCount - 1)
+    _g_repMoveStack[v21] = g_hashKeyLow
+    g_move50 = g_move50 + 1
+
+    return true
+end
+
+function UnmakeMove(a1) -- Line: 2113
+    local v1, v2
+    g_toMove = 8 - g_toMove
+    g_baseEval = -g_baseEval
+    g_moveCount = g_moveCount - 1
+    local v3 = 8 - g_toMove
+
+    bit32.rshift(g_toMove, 3)
+    bit32.rshift(v3, 3)
+
+    local v4 = bit32.band(a1, 16711680)
+    local captured = g_moveUndoStack[1 + g_moveCount].captured
+    local v5 = bit32.band(bit32.rshift(a1, 8), 255)
+    local v6 = bit32.band(a1, 255)
+    local v7 = g_board[v5 + 1]
+    g_enPassentSquare = g_moveUndoStack[1 + g_moveCount].ep
+    g_castleRights = g_moveUndoStack[1 + g_moveCount].castleRights
+    g_inCheck = g_moveUndoStack[1 + g_moveCount].inCheck
+    g_baseEval = g_moveUndoStack[1 + g_moveCount].baseEval
+    g_hashKeyLow = g_moveUndoStack[1 + g_moveCount].hashKeyLow
+    g_hashKeyHigh = g_moveUndoStack[1 + g_moveCount].hashKeyHigh
+    g_move50 = g_moveUndoStack[1 + g_moveCount].move50
+
+    if v4 > 0 then
+        local v8, v9, v10
+
+        if 0 < (bit32.band(v4, moveflagCastleKing)) then
+            v9 = g_board[v5 - 1 + 1]
+            g_board[v5 + 1 + 1] = v9
+            local _g_board = g_board
+            v8 = v5 - 1 + 1
+            _g_board[v8] = pieceEmpty
+            v10 = g_pieceIndex[v5 - 1 + 1]
+            g_pieceIndex[v5 + 1 + 1] = v10
+            local _g_pieceList = g_pieceList
+            v8 = bit32.bor(bit32.lshift(bit32.band(v9, 15), 4), v10) + 1
+            _g_pieceList[v8] = v5 + 1
+        elseif 0 < (bit32.band(v4, moveflagCastleQueen)) then
+            v9 = g_board[v5 + 1 + 1]
+            g_board[v5 - 2 + 1] = v9
+            local _g_board_2 = g_board
+            v8 = v5 + 1 + 1
+            _g_board_2[v8] = pieceEmpty
+            v10 = g_pieceIndex[v5 + 1 + 1]
+            g_pieceIndex[v5 - 2 + 1] = v10
+            local _g_pieceList_2 = g_pieceList
+            v8 = bit32.bor(bit32.lshift(bit32.band(v9, 15), 4), v10) + 1
+            _g_pieceList_2[v8] = v5 - 2
+        end
+    end
+
+    if not (0 < (bit32.band(v4, moveflagPromotion))) then
+        g_board[v6 + 1] = g_board[v5 + 1]
+    else
+        v7 = bit32.bor(bit32.band(g_board[v5 + 1], 4294967288), piecePawn)
+        g_board[v6 + 1] = v7
+        local v11 = bit32.band(g_board[v6 + 1], 15)
+        local v12 = bit32.band(g_board[v5 + 1], 15)
+        g_pieceCount[v12 + 1] = g_pieceCount[v12 + 1] - 1
+        local v13 = g_pieceList[bit32.bor(bit32.lshift(v12, 4), g_pieceCount[v12 + 1]) + 1]
+        g_pieceIndex[v13 + 1] = g_pieceIndex[v5 + 1]
+        local _g_pieceList_4 = g_pieceList
+        v1 = bit32.lshift(v12, 4)
+        v2 = g_pieceIndex[v13 + 1]
+        _g_pieceList_4[bit32.bor(v1, v2) + 1] = v13
+        local _g_pieceList_5 = g_pieceList
+        v1 = bit32.lshift(v12, 4)
+        local _g_pieceCount_2 = g_pieceCount
+        _g_pieceList_5[bit32.bor(v1, _g_pieceCount_2[v12 + 1]) + 1] = 0
+        g_pieceIndex[v5 + 1] = g_pieceCount[v11 + 1]
+        local _g_pieceList_6 = g_pieceList
+        v1 = bit32.lshift(v11, 4)
+        v2 = g_pieceIndex[v5 + 1]
+        _g_pieceList_6[bit32.bor(v1, v2) + 1] = v5
+        g_pieceCount[v11 + 1] = g_pieceCount[v11 + 1] + 1
+    end
+
+    local v14 = v5
+
+    if 0 < (bit32.band(v4, moveflagEPC)) then
+        v14 = if g_toMove ~= colorWhite then v5 - 16 else v5 + 16
+        g_board[v5 + 1] = pieceEmpty
+    end
+
+    g_board[v14 + 1] = captured
+    g_pieceIndex[v6 + 1] = g_pieceIndex[v5 + 1]
+    local _g_pieceList_7 = g_pieceList
+    v1 = bit32.lshift(bit32.band(v7, 15), 4)
+    v2 = g_pieceIndex[v6 + 1]
+    _g_pieceList_7[bit32.bor(v1, v2) + 1] = v6
+
+    if captured > 0 then
+        local v15 = bit32.band(captured, 15)
+        g_pieceIndex[v14 + 1] = g_pieceCount[v15 + 1]
+        local _g_pieceList_8 = g_pieceList
+        v1 = bit32.lshift(v15, 4)
+        v2 = g_pieceCount[v15 + 1]
+        _g_pieceList_8[bit32.bor(v1, v2) + 1] = v14
+        g_pieceCount[v15 + 1] = g_pieceCount[v15 + 1] + 1
+    end
+end
+
+function ExposesCheck(a1, a2) -- Line: 2217
+    local v1 = a2 - a1 + 128
+
+    if bit32.band(g_vectorDelta[1 + v1].pieceMask[1], (bit32.lshift(1, pieceQueen)))
+        == 0 then
+        return false
+    end
+
+    local delta = g_vectorDelta[1 + v1].delta
+    local v2 = a2 + delta
+
+    while g_board[v2 + 1] == 0 do
+        v2 = v2 + delta
+    end
+
+    local v3 = g_board[v2 + 1]
+
+    if bit32.band(bit32.band(v3, (bit32.bxor(g_board[1 + a2], 24))), 24) == 0 then
+        return false
+    end
+
+    local v4 = v2 - a2 + 128
+
+    return bit32.band(g_vectorDelta[v4 + 1].pieceMask[bit32.band(bit32.rshift(v3, 3), 1) + 1], (bit32.lshift(1, (bit32.band(v3, 7)))))
+        ~= 0
+end
+
+function IsSquareOnPieceLine(a1, a2) -- Line: 2246
+    local v1 = a2 - a1 + 128
+    local v2 = g_board[1 + a2]
+
+    return 0
+        < (bit32.band(g_vectorDelta[1 + v1].pieceMask[bit32.band(bit32.rshift(v2, 3), 1) + 1], (bit32.lshift(1, (bit32.band(v2, 7))))))
+end
+
+function GetMoveSAN(a1, a2) -- Line: 2255
+    local v1, v2
+    local v3 = bit32.band(a1, 255)
+    local v4 = bit32.band(bit32.rshift(a1, 8), 255)
+
+    if (bit32.band(a1, moveflagCastleKing)) > 0 then
+        return "O-O"
+    end
+
+    if (bit32.band(a1, moveflagCastleQueen)) > 0 then
+        return "O-O-O"
+    end
+
+    local v5 = bit32.band(g_board[v3 + 1], 7)
+    local v6 = string.upper(PieceCharList[v5 + 1])
+    local v7 = false
+    local v8 = true
+    local v9 = true
+
+    if a2 == nil then
+        a2 = GenerateValidMoves()
+    end
+
+    local v10 = #a2 - 1
+    local v11 = a1
+
+    for i = 0, v10 do
+        v2 = bit32.band(a2[i + 1], 255)
+        v1 = bit32.band(bit32.rshift(a2[i + 1], 8), 255)
+
+        if v2 ~= v3 and v1 == v4 and bit32.band(g_board[v2 + 1], 7) == v5 then
+            v7 = true
+
+            if (bit32.band(v2, 240)) == bit32.band(v3, 240) then
+                v8 = false
+            end
+
+            if (bit32.band(v2, 15)) == bit32.band(v3, 15) then
+                v9 = false
+            end
+        end
+    end
+
+    if not v7 then
+        if v5 == piecePawn and g_board[v4 + 1] ~= 0 then
+            v6 = v6 .. string.sub(FormatSquare(v3), 1, 1)
+        end
+    else
+        v6 = if v9 then
+            v6 .. string.sub(FormatSquare(v3), 1, 1)
+        else
+            if not v8 then
+                v6 .. FormatSquare(v3)
+            else
+                v6 .. string.sub(FormatSquare(v3), 2, 2)
+    end
+
+    if g_board[v4 + 1] ~= 0 or 0 < (bit32.band(v11, moveflagEPC)) then
+        v6 = v6 .. "x"
+    end
+
+    v6 = v6 .. FormatSquare(v4)
+
+    if 0 < (bit32.band(v11, moveflagPromotion)) then
+        v6 = if 0 < (bit32.band(v11, moveflagPromoteBishop)) then
+            v6 .. "=B"
+        else
+            if not (0 < (bit32.band(v11, moveflagPromoteKnight))) then
+                if not (0 < (bit32.band(v11, moveflagPromoteQueen))) then
+                    v6 .. "=R"
+                else
+                    v6 .. "=Q"
+            else
+                v6 .. "=N"
+    end
+
+    MakeMove(v11)
+
+    if g_inCheck then
+        local v12 = GenerateValidMoves()
+        local _iif = iif
+        v6 = v6 .. _iif(#v12 == 0, "#", "+")
+    end
+
+    UnmakeMove(v11)
+
+    return v6
+end
+
+function GenerateMove(a1, a2) -- Line: 2350
+    return (bit32.bor(a1, (bit32.lshift(a2, 8))))
+end
+
+function GenerateMove2(a1, a2, a3) -- Line: 2356
+    return (bit32.bor(a1, (bit32.bor(bit32.lshift(a2, 8), a3))))
+end
+
+function GenerateValidMoves() -- Line: 2362
+    local v1 = {}
+    local v2 = {}
+
+    GenerateCaptureMoves(v2)
+    GenerateAllMoves(v2)
+
+    for i = #v2 - 1, 0, -1 do
+        if MakeMove(v2[i + 1]) then
+            v1[#v1 + 1] = v2[i + 1]
+            UnmakeMove(v2[i + 1])
+        end
+    end
+
+    return v1
+end
+
+function GenerateAllMoves(a1) -- Line: 2381
+    local v1 = bit32.lshift(bit32.bor(g_toMove, 1), 4)
+    local v2 = g_pieceList[v1 + 1]
+    v1 = v1 + 1
+
+    while v2 ~= 0 do
+        GeneratePawnMoves(a1, v2)
+
+        v2 = g_pieceList[v1 + 1]
+        v1 = v1 + 1
+    end
+
+    v1 = bit32.lshift(bit32.bor(g_toMove, 2), 4)
+    v2 = g_pieceList[v1 + 1]
+    v1 = v1 + 1
+
+    while v2 ~= 0 do
+        MSt(a1, 1, v2, 31, nil)
+        MSt(a1, 1, v2, 33, nil)
+        MSt(a1, 1, v2, 14, nil)
+        MSt(a1, 1, v2, -14, nil)
+        MSt(a1, 1, v2, -31, nil)
+        MSt(a1, 1, v2, -33, nil)
+        MSt(a1, 1, v2, 18, nil)
+        MSt(a1, 1, v2, -18, nil)
+
+        v2 = g_pieceList[v1 + 1]
+        v1 = v1 + 1
+    end
+
+    v1 = bit32.lshift(bit32.bor(g_toMove, 3), 4)
+    v2 = g_pieceList[v1 + 1]
+    v1 = v1 + 1
+
+    while v2 ~= 0 do
+        MSt(a1, 2, v2, -15, nil)
+        MSt(a1, 2, v2, -17, nil)
+        MSt(a1, 2, v2, 15, nil)
+        MSt(a1, 2, v2, 17, nil)
+
+        v2 = g_pieceList[v1 + 1]
+        v1 = v1 + 1
+    end
+
+    v1 = bit32.lshift(bit32.bor(g_toMove, 4), 4)
+    v2 = g_pieceList[v1 + 1]
+    v1 = v1 + 1
+
+    while v2 ~= 0 do
+        MSt(a1, 2, v2, -1, nil)
+        MSt(a1, 2, v2, 1, nil)
+        MSt(a1, 2, v2, 16, nil)
+        MSt(a1, 2, v2, -16, nil)
+
+        v2 = g_pieceList[v1 + 1]
+        v1 = v1 + 1
+    end
+
+    v1 = bit32.lshift(bit32.bor(g_toMove, 5), 4)
+    v2 = g_pieceList[v1 + 1]
+    v1 = v1 + 1
+
+    while v2 ~= 0 do
+        MSt(a1, 2, v2, -15, nil)
+        MSt(a1, 2, v2, -17, nil)
+        MSt(a1, 2, v2, 15, nil)
+        MSt(a1, 2, v2, 17, nil)
+        MSt(a1, 2, v2, -1, nil)
+        MSt(a1, 2, v2, 1, nil)
+        MSt(a1, 2, v2, 16, nil)
+        MSt(a1, 2, v2, -16, nil)
+
+        v2 = g_pieceList[v1 + 1]
+        v1 = v1 + 1
+    end
+
+    v1 = bit32.lshift(bit32.bor(g_toMove, 6), 4)
+    v2 = g_pieceList[v1 + 1]
+
+    MSt(a1, 1, v2, -15, nil)
+    MSt(a1, 1, v2, -17, nil)
+    MSt(a1, 1, v2, 15, nil)
+    MSt(a1, 1, v2, 17, nil)
+    MSt(a1, 1, v2, -1, nil)
+    MSt(a1, 1, v2, 1, nil)
+    MSt(a1, 1, v2, -16, nil)
+    MSt(a1, 1, v2, 16, nil)
+
+    if not g_inCheck then
+        local _g_castleRights = g_castleRights
+
+        if g_toMove == 0 then
+            _g_castleRights = bit32.rshift(_g_castleRights, 2)
+        end
+
+        if 0 < (bit32.band(_g_castleRights, 1))
+            and g_board[v2 + 1 + 1] == pieceEmpty
+            and g_board[v2 + 2 + 1] == pieceEmpty then
+            a1[#a1 + 1] = (GenerateMove2(v2, v2 + 2, moveflagCastleKing))
+        end
+
+        if 0 < (bit32.band(_g_castleRights, 2))
+            and g_board[v2 - 1 + 1] == pieceEmpty
+            and g_board[v2 - 2 + 1] == pieceEmpty
+            and g_board[v2 - 3 + 1] == pieceEmpty then
+            a1[#a1 + 1] = (GenerateMove2(v2, v2 - 2, moveflagCastleQueen))
+        end
+    end
+end
+
+function MSt(a1, a2, a3, a4, a5) -- Line: 2495
+    local v1 = a3 + a4
+
+    if a2 == 1 then
+        if a5 == nil and g_board[1 + v1] == 0 then
+            a1[#a1 + 1] = (GenerateMove(a3, v1))
+            return
+        end
+
+        if a5 ~= nil and 0 < (bit32.band(g_board[1 + v1], a5)) then
+            a1[#a1 + 1] = (GenerateMove(a3, v1))
+            return
+        end
+
+        return
+    end
+
+    if a2 == 2 then
+        while g_board[1 + v1] == 0 do
+            a1[#a1 + 1] = (GenerateMove(a3, v1))
+            v1 = v1 + a4
+        end
+    elseif a2 == 3 then
+        while g_board[1 + v1] == 0 do
+            v1 = v1 + a4
+        end
+
+        if 0 < (bit32.band(g_board[1 + v1], a5)) then
+            a1[#a1 + 1] = (GenerateMove(a3, v1))
+        end
+    end
+end
+
+function GenerateCaptureMoves(a1) -- Line: 2527
+    local v1
+    local v2 = iif(g_toMove == 8, -16, 16)
+    local v3 = iif(g_toMove == 8, 16, 8)
+    local v4 = bit32.lshift(bit32.bor(g_toMove, 1), 4)
+    local v5 = g_pieceList[v4 + 1]
+    v4 = v4 + 1
+    local v6 = a1
+
+    while v5 ~= 0 do
+        v1 = v5 + v2 - 1
+
+        if 0 < (bit32.band(g_board[v1 + 1], v3)) then
+            MovePawnTo(v6, v5, v1)
+        end
+
+        v1 = v5 + v2 + 1
+
+        if 0 < (bit32.band(g_board[v1 + 1], v3)) then
+            MovePawnTo(v6, v5, v1)
+        end
+
+        v5 = g_pieceList[v4 + 1]
+        v4 = v4 + 1
+    end
+
+    if g_enPassentSquare ~= -1 then
+        v2 = iif(g_toMove == colorWhite, -16, 16)
+        local v7 = bit32.bor(g_toMove, piecePawn)
+        v5 = g_enPassentSquare - (v2 + 1)
+
+        if bit32.band(g_board[v5 + 1], 15) == v7 then
+            v6[#v6 + 1] = (GenerateMove2(v5, g_enPassentSquare, moveflagEPC))
+        end
+
+        v5 = g_enPassentSquare - (v2 - 1)
+
+        if bit32.band(g_board[v5 + 1], 15) == v7 then
+            v6[#v6 + 1] = (GenerateMove2(v5, g_enPassentSquare, moveflagEPC))
+        end
+    end
+
+    v4 = bit32.lshift(bit32.bor(g_toMove, 2), 4)
+    v5 = g_pieceList[v4 + 1]
+    v4 = v4 + 1
+
+    while v5 ~= 0 do
+        MSt(v6, 1, v5, 31, v3)
+        MSt(v6, 1, v5, 33, v3)
+        MSt(v6, 1, v5, 14, v3)
+        MSt(v6, 1, v5, -14, v3)
+        MSt(v6, 1, v5, -31, v3)
+        MSt(v6, 1, v5, -33, v3)
+        MSt(v6, 1, v5, 18, v3)
+        MSt(v6, 1, v5, -18, v3)
+
+        v5 = g_pieceList[v4 + 1]
+        v4 = v4 + 1
+    end
+
+    v4 = bit32.lshift(bit32.bor(g_toMove, 3), 4)
+    v5 = g_pieceList[v4 + 1]
+    v4 = v4 + 1
+
+    while v5 ~= 0 do
+        MSt(v6, 3, v5, -15, v3)
+        MSt(v6, 3, v5, -17, v3)
+        MSt(v6, 3, v5, 15, v3)
+        MSt(v6, 3, v5, 17, v3)
+
+        v5 = g_pieceList[v4 + 1]
+        v4 = v4 + 1
+    end
+
+    v4 = bit32.lshift(bit32.bor(g_toMove, 4), 4)
+    v5 = g_pieceList[v4 + 1]
+    v4 = v4 + 1
+
+    while v5 ~= 0 do
+        MSt(v6, 3, v5, -1, v3)
+        MSt(v6, 3, v5, 1, v3)
+        MSt(v6, 3, v5, -16, v3)
+        MSt(v6, 3, v5, 16, v3)
+
+        v5 = g_pieceList[v4 + 1]
+        v4 = v4 + 1
+    end
+
+    v4 = bit32.lshift(bit32.bor(g_toMove, 5), 4)
+    v5 = g_pieceList[v4 + 1]
+    v4 = v4 + 1
+
+    while v5 ~= 0 do
+        MSt(v6, 3, v5, -15, v3)
+        MSt(v6, 3, v5, -17, v3)
+        MSt(v6, 3, v5, 15, v3)
+        MSt(v6, 3, v5, 17, v3)
+        MSt(v6, 3, v5, -1, v3)
+        MSt(v6, 3, v5, 1, v3)
+        MSt(v6, 3, v5, -16, v3)
+        MSt(v6, 3, v5, 16, v3)
+
+        v5 = g_pieceList[v4 + 1]
+        v4 = v4 + 1
+    end
+
+    v4 = bit32.lshift(bit32.bor(g_toMove, 6), 4)
+    v5 = g_pieceList[v4 + 1]
+
+    MSt(v6, 1, v5, -15, v3)
+    MSt(v6, 1, v5, -17, v3)
+    MSt(v6, 1, v5, 15, v3)
+    MSt(v6, 1, v5, 17, v3)
+    MSt(v6, 1, v5, -1, v3)
+    MSt(v6, 1, v5, 1, v3)
+    MSt(v6, 1, v5, -16, v3)
+    MSt(v6, 1, v5, 16, v3)
+end
+
+function MovePawnTo(a1, a2, a3) -- Line: 2651
+    local v1 = bit32.band(a3, 240)
+
+    if v1 ~= 144 and v1 ~= 32 then
+        a1[#a1 + 1] = (GenerateMove2(a2, a3, 0))
+        return
+    end
+
+    a1[#a1 + 1] = (GenerateMove2(a2, a3, (bit32.bor(moveflagPromotion, moveflagPromoteQueen))))
+    a1[#a1 + 1] = (GenerateMove2(a2, a3, (bit32.bor(moveflagPromotion, moveflagPromoteKnight))))
+    a1[#a1 + 1] = (GenerateMove2(a2, a3, (bit32.bor(moveflagPromotion, moveflagPromoteBishop))))
+    a1[#a1 + 1] = (GenerateMove2(a2, a3, moveflagPromotion))
+end
+
+function GeneratePawnMoves(a1, a2) -- Line: 2666
+    local v1 = bit32.band(g_board[1 + a2], colorWhite)
+    local v2 = iif(v1 == colorWhite, -16, 16)
+    local v3 = a2 + v2
+
+    if g_board[1 + v3] == 0 then
+        MovePawnTo(a1, a2, v3, pieceEmpty)
+
+        if bit32.band(a2, 240) ~= 48 then
+            if bit32.band(a2, 240) == 128 and v1 == colorWhite then
+                v3 = v3 + v2
+
+                if g_board[1 + v3] == 0 then
+                    a1[#a1 + 1] = (GenerateMove(a2, v3))
+                end
+            end
+        elseif v1 ~= colorWhite or bit32.band(a2, 240) == 128 and v1 == colorWhite then
+            v3 = v3 + v2
+
+            if g_board[1 + v3] == 0 then
+                a1[#a1 + 1] = (GenerateMove(a2, v3))
+            end
+        end
+    end
+end
+
+function See(a1) -- Line: 2689
+    local v1 = bit32.band(a1, 255)
+    local v2 = bit32.band(bit32.rshift(a1, 8), 255)
+    local v3 = g_board[v1 + 1]
+    local v4 = iif(0 < (bit32.band(v3, colorWhite)), colorWhite, 0)
+    local v5 = 8 - v4
+    local v6 = {}
+    local v7 = {}
+    local v8 = g_seeValues[bit32.band(v3, 15) + 1]
+    local v9 = g_seeValues[bit32.band(g_board[v2 + 1], 15) + 1]
+    local v10 = v9 - v8
+    local v11 = iif(0 < (bit32.band(v3, colorWhite)), -16, 16)
+    local v12 = v8 - v9
+
+    if v8 <= v9 then
+        return true
+    end
+
+    if (bit32.rshift(a1, 16)) > 0 then
+        return true
+    end
+
+    local v13 = bit32.band(g_board[1 + (v2 + v11 + 1)], 15)
+
+    if v13 ~= bit32.bor(piecePawn, v5) then
+        v13 = bit32.band(g_board[1 + (v2 + v11 - 1)], 15)
+
+        if v13 ~= bit32.bor(piecePawn, v5) then
+            SeeAddKnightAttacks(v2, v5, v6)
+
+            if #v6 ~= 0 and g_seeValues[1 + pieceKnight] < v12 then
+                return false
+            end
+
+            g_board[v1 + 1] = 0
+            local _pieceBishop = pieceBishop
+            local _pieceQueen = pieceQueen
+
+            for i = _pieceBishop, _pieceQueen do
+                if SeeAddSliderAttacks(v2, v5, v6, i) and g_seeValues[i + 1] < v12 then
+                    g_board[v1 + 1] = v3
+                    return false
+                end
+            end
+
+            v13 = bit32.band(g_board[1 + (v2 - v11 + 1)], 15)
+
+            if v13 ~= bit32.bor(piecePawn, v4) then
+                v13 = bit32.band(g_board[1 + (v2 - v11 - 1)], 15)
+
+                if v13 ~= bit32.bor(piecePawn, v4) then
+                    local v14, v15, v16, v17
+                    SeeAddSliderAttacks(v2, v5, v6, pieceKing)
+                    SeeAddKnightAttacks(v2, v4, v7)
+
+                    local _pieceBishop_2 = pieceBishop
+                    local _pieceKing = pieceKing
+
+                    for j = _pieceBishop_2, _pieceKing do
+                        SeeAddSliderAttacks(v2, v4, v7, j)
+                    end
+
+                    g_board[v1 + 1] = v3
+
+                    while true do
+                        v16 = 1000
+                        v17 = -1
+                        v13 = #v6 - 1
+
+                        for k = 0, v13 do
+                            if v6[k + 1] ~= 0 then
+                                v14 = g_seeValues[bit32.band(g_board[1 + v6[k + 1]], 7) + 1]
+
+                                if v14 < v16 then
+                                    v16 = v14
+                                    v17 = k
+                                end
+                            end
+                        end
+
+                        if v17 == -1 then
+                            return true
+                        end
+
+                        v10 = v10 + v16
+
+                        if v10 < 0 then
+                            return false
+                        end
+
+                        v15 = v6[v17 + 1]
+                        v6[v17 + 1] = 0
+
+                        SeeAddXrayAttack(v2, v15, v4, v7, v6)
+
+                        v16 = 1000
+                        v17 = -1
+                        v13 = #v7 - 1
+
+                        for n = 0, v13 do
+                            if v7[n + 1] ~= 0 then
+                                v14 = g_seeValues[bit32.band(g_board[1 + v7[n + 1]], 7) + 1]
+
+                                if v14 < v16 then
+                                    v16 = v14
+                                    v17 = n
+                                end
+                            end
+                        end
+
+                        if v17 == -1 then
+                            return false
+                        end
+
+                        v10 = v10 - v16
+
+                        if v10 >= 0 then
+                            return true
+                        end
+
+                        v15 = v7[v17 + 1]
+                        v7[v17 + 1] = 0
+
+                        SeeAddXrayAttack(v2, v15, v4, v7, v6)
+                    end
+                end
+            end
+
+            g_board[v1 + 1] = v3
+
+            return true
+        end
+    end
+
+    return false
+end
+
+function SeeAddXrayAttack(a1, a2, a3, a4, a5) -- Line: 2846
+    local v1 = a2 - a1 + 128
+    local v2 = -g_vectorDelta[1 + v1].delta
+
+    if v2 == 0 then
+        return
+    end
+
+    local v3 = a2 + v2
+
+    while g_board[1 + v3] == 0 do
+        v3 = v3 + v2
+    end
+
+    if 0 < (bit32.band(g_board[1 + v3], 24)) and IsSquareOnPieceLine(a1, v3) then
+        if bit32.band(g_board[1 + v3], 8) == a3 then
+            a4[#a4 + 1] = v3
+            return
+        end
+
+        a5[#a5 + 1] = v3
+    end
+end
+
+function SeeAddKnightAttacks(a1, a2, a3) -- Line: 2868
+    local v1 = bit32.lshift(bit32.bor(a2, pieceKnight), 4)
+    local v2 = g_pieceList[v1 + 1]
+    v1 = v1 + 1
+    local v3, v4 = a1, a3
+
+    while v2 ~= 0 do
+        if IsSquareOnPieceLine(v3, v2) then
+            v4[#v4 + 1] = v2
+        end
+
+        v2 = g_pieceList[v1 + 1]
+        v1 = v1 + 1
+    end
+end
+
+function SeeAddSliderAttacks(a1, a2, a3, a4) -- Line: 2884
+    local v1 = bit32.lshift(bit32.bor(a2, a4), 4)
+    local v2 = g_pieceList[v1 + 1]
+    local v3 = false
+    v1 = v1 + 1
+    local v4, v5 = a1, a3
+
+    while v2 ~= 0 do
+        if IsSquareAttackableFrom(v4, v2) then
+            v5[#v5 + 1] = v2
+            v3 = true
+        end
+
+        v2 = g_pieceList[v1 + 1]
+        v1 = v1 + 1
+    end
+
+    return v3
+end
+
+function FormatMove(a1) -- Line: 2905
+    local v1 = (FormatSquare((bit32.band(a1, 255))))
+        .. FormatSquare((bit32.band(bit32.rshift(a1, 8), 255)))
+
+    if 0 < (bit32.band(a1, moveflagPromotion)) then
+        if 0 < (bit32.band(a1, moveflagPromoteBishop)) then
+            return v1 .. "b"
+        end
+
+        if 0 < (bit32.band(a1, moveflagPromoteKnight)) then
+            return v1 .. "n"
+        end
+
+        if 0 < (bit32.band(a1, moveflagPromoteQueen)) then
+            return v1 .. "q"
+        end
+
+        v1 = v1 .. "r"
+    end
+
+    return v1
+end
+
+function GetMoveFromString(a1) -- Line: 2927
+    local v1 = GenerateValidMoves()
+    local v2 = #v1 - 1
+
+    for i = 0, v2 do
+        if FormatMove(v1[i + 1]) == a1 then
+            return v1[i + 1]
+        end
+    end
+
+    print("busted! ->" .. a1 .. " fen:" .. GetFen())
+end
+
+function PVFromHash(a1, a2) -- Line: 2940
+    local v1 = ""
+
+    if a2 ~= 0 then
+        v1 = " " .. GetMoveSAN(a1)
+        MakeMove(a1)
+
+        local v2 = g_hashTable[bit32.band(g_hashKeyLow, g_hashMask) + 1]
+
+        if v2 ~= nil and v2.lock == g_hashKeyHigh and v2.bestMove ~= nil then
+            v1 = v1 .. PVFromHash(v2.bestMove, a2 - 1)
+        end
+
+        UnmakeMove(a1)
+    end
+
+    return v1
+end
+
+function BuildPVMessage(a1, a2, a3) -- Line: 2961
+    local v1 = g_nodeCount + g_qNodeCount
+    return "Ply:"
+        .. a3
+            .. " Score:"
+                .. (string.format("%d", a2))
+                    .. " Nodes:" .. (string.format("%d", v1)) .. " " .. PVFromHash(a1, 15)
+end
+
+function finishPlyCallback(a1, a2, a3) -- Line: 2970
+    if a1 ~= nil and a1 ~= 0 then
+        print(BuildPVMessage(a1, a2, a3))
+    end
+end
+
+function finishMoveCallback(a1, a2, a3) -- Line: 2978
+    if a1 ~= nil and a1 ~= 0 then
+        MakeMove(a1)
+
+        g_foundmove = a1
+        g_foundvalue = a2
+    end
+end
+
+function autogame() -- Line: 2990
+    local v1 = 0
+    local v2 = -1
+
+    repeat
+        v2 = -v2
+
+        if v2 > 0 then
+            v1 = v1 + 1
+            print("Move: " .. (string.format("%d", v1)) .. ". ")
+        end
+
+        Search(8)
+    until g_foundmove == 0
+end
+
+InitializeEval()
+ResetGame()
+
+v1.Name = "GarboChess"
+v1.EngineName = "GarboChess"
+v1.LastStats = GarboRuntime.LastStats
+
+function v1:Configure(options)
+    options = type(options) == "table" and options or {}
+    if options.SliceTime ~= nil then
+        GarboRuntime.SliceTime = math.clamp(tonumber(options.SliceTime) or 0.004, 0.001, 0.020)
+    end
+    if options.YieldEvery ~= nil then
+        GarboRuntime.YieldEvery = math.clamp(math.floor(tonumber(options.YieldEvery) or 64), 16, 1024)
+    end
+    if options.NodeLimit ~= nil then
+        GarboRuntime.NodeLimit = math.clamp(math.floor(tonumber(options.NodeLimit) or 2500000), 10000, 50000000)
+    end
+    return true
+end
+
+function v1:GetStats()
+    return GarboRuntime.LastStats or {}
+end
+
+function v1:GetBestMoveFromFEN(fen, thinkTime, options)
+    if GarboRuntime.Busy then
+        return nil, nil, {tag = "BUSY", message = "GarboChess is finishing its current search."}
+    end
+    if type(fen) ~= "string" or fen == "" then
+        return nil
+    end
+
+    options = type(options) == "table" and options or {}
+    local fields = {}
+    for field in string.gmatch(fen, "%S+") do
+        fields[#fields + 1] = field
+    end
+    if #fields < 4 or (fields[2] ~= "w" and fields[2] ~= "b") then
+        return nil
+    end
+
+    local requested = math.clamp(tonumber(thinkTime) or 1.0, 0.15, 20)
+    local maxDepth = math.clamp(
+        math.floor(tonumber(options.TargetDepth or options.MaxDepth) or 8),
+        1,
+        20
+    )
+    local nodeLimit = math.clamp(
+        math.floor(tonumber(options.NodeLimit) or GarboRuntime.NodeLimit or 2500000),
+        10000,
+        50000000
+    )
+
+    GarboRuntime.Busy = true
+    GarboRuntime.Options = options
+    GarboRuntime.NodeLimit = nodeLimit
+    GarboRuntime.YieldEvery = math.clamp(math.floor(tonumber(options.YieldEvery) or GarboRuntime.YieldEvery or 64), 16, 1024)
+    GarboRuntime.SliceTime = math.clamp(tonumber(options.SliceTime) or GarboRuntime.SliceTime or 0.004, 0.001, 0.020)
+    GarboRuntime.SliceTimeProvider = options.SliceTimeProvider
+    GarboRuntime.Cancel = options.Cancel
+    GarboRuntime.NextPollNode = 0
+    GarboRuntime.LastYieldAt = os.clock()
+    GarboRuntime.StopReason = nil
+
+    local started = os.clock()
+    local ok, searchError = pcall(function()
+        InitializeFromFen(fen)
+        g_timeout = requested
+        g_maxfinCnt = nodeLimit
+        g_completedDepth = 0
+        Search(maxDepth)
+    end)
+
+    local elapsed = os.clock() - started
+    local move = ok and g_foundmove ~= 0 and FormatMove(g_foundmove) or nil
+    local score = move and tonumber(g_foundvalue) or nil
+    local totalNodes = (tonumber(g_nodeCount) or 0) + (tonumber(g_qNodeCount) or 0)
+    local stats = {
+        Engine = "GarboChess",
+        Depth = tonumber(g_completedDepth) or 0,
+        Nodes = totalNodes,
+        MainNodes = tonumber(g_nodeCount) or 0,
+        QNodes = tonumber(g_qNodeCount) or 0,
+        Elapsed = elapsed,
+        NPS = elapsed > 0 and math.floor(totalNodes / elapsed) or 0,
+        StopReason = GarboRuntime.StopReason or (ok and "completed" or "error"),
+        Error = not ok and tostring(searchError) or nil,
+        Move = move,
+        Score = score,
+    }
+    GarboRuntime.LastStats = stats
+    v1.LastStats = stats
+
+    GarboRuntime.Options = {}
+    GarboRuntime.SliceTimeProvider = nil
+    GarboRuntime.Cancel = nil
+    GarboRuntime.Busy = false
+
+    if not ok then
+        warn("[GarboChess] Search failed: " .. tostring(searchError))
+        return nil
+    end
+    if not move then
+        return nil, nil, {tag = GarboRuntime.StopReason or "NO_MOVE", message = "GarboChess did not complete a legal move."}
+    end
+    return move, score, stats
+end
+
+_G.__GARBO_CHESS_API = v1
+_G.__FIRST_ENGINE_API = v1
+
+return v1
